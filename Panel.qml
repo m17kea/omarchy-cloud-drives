@@ -4,6 +4,7 @@ import Quickshell
 import Quickshell.Io
 import qs.Ui
 import qs.Commons
+import "ProcessEnvironment.js" as ProcessEnvironment
 
 Panel {
   id: root
@@ -12,6 +13,7 @@ Panel {
   manageIpc: false
 
   readonly property string script: decodeURIComponent(String(Qt.resolvedUrl("bin/omarchy-cloud-drives")).replace(/^file:\/\//, ""))
+  readonly property string signinLauncher: decodeURIComponent(String(Qt.resolvedUrl("bin/icloud-signin.py")).replace(/^file:\/\//, ""))
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.5)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
@@ -26,15 +28,10 @@ Panel {
   property bool busy: false
   property string pendingAction: ""
   property string pendingProvider: ""
-  property bool setupVisible: false
   signal actionFinished(string action, string providerId, bool ok, string message)
 
   readonly property int mountedCount: providers.filter(function(p) { return p.mounted }).length
   readonly property int connectedCount: providers.filter(function(p) { return p.configured }).length
-  readonly property var icloudProvider: {
-    for (var i = 0; i < providers.length; i++) if (providers[i].id === "icloud") return providers[i]
-    return ({ configured: false, mounted: false, path: "" })
-  }
 
   function refresh() { if (!stateProc.running) stateProc.running = true }
 
@@ -42,13 +39,24 @@ Panel {
     if (busy) return
     lastError = ""
     if ((action === "connect" || action === "reconnect") && id === "icloud") {
-      setupVisible = true
-      open()
-      wizard.begin()
+      busy = true
+      try {
+        // Detached dispatch is intentionally untracked. Quickshell's current
+        // API returns void; the supervisor owns its lock, timeout and cleanup.
+        signinProc.startDetached()
+      } catch (e) {
+        busy = false
+        lastError = "Could not open iCloud sign-in. Try again."
+        return
+      }
+      busy = false
+      refresh()
+      close()
       return
     }
     if (action === "connect" || action === "disconnect") {
-      Quickshell.execDetached([script, "launch", action, id])
+      terminalProc.command = [script, "launch", action, id]
+      terminalProc.startDetached()
       close()
       return
     }
@@ -86,10 +94,7 @@ Panel {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
   Component.onCompleted: refresh()
-  onOpenedChanged: {
-    if (opened) refresh()
-    else { wizard.cancel(); setupVisible = false }
-  }
+  onOpenedChanged: if (opened) refresh()
 
   Timer {
     interval: root.opened ? 2000 : 30000
@@ -100,6 +105,8 @@ Panel {
 
   Process {
     id: stateProc
+    clearEnvironment: true
+    environment: ProcessEnvironment.build(function(name) { return Quickshell.env(name) }, false)
     command: [root.script, "state"]
     stdout: StdioCollector { id: stateOutput; waitForEnd: true }
     // Account details and diagnostics never become error text in the shell.
@@ -120,7 +127,12 @@ Panel {
         root.mountRoot = String(s.root || "").slice(0, 1024)
         root.providers = s.providers.filter(function(p) {
           return p && ["icloud", "google", "onedrive"].indexOf(p.id) !== -1
-        }).slice(0, 3).sort(function(a, b) {
+        }).slice(0, 3).map(function(p) {
+          var labels = { icloud: ["iCloud Drive", "󰀸"], google: ["Google Drive", "󰊶"], onedrive: ["OneDrive", "󰏊"] }
+          return { id: p.id, name: labels[p.id][0], glyph: labels[p.id][1],
+            configured: p.configured === true, mounted: p.mounted === true,
+            active: p.active === true, error: !!p.error, path: String(p.path || "").slice(0, 1024) }
+        }).sort(function(a, b) {
           return a.id === "icloud" ? -1 : (b.id === "icloud" ? 1 : 0)
         })
         // state emits fixed, actionable messages (never authentication stderr).
@@ -132,7 +144,25 @@ Panel {
   }
 
   Process {
+    id: terminalProc
+    clearEnvironment: true
+    environment: ProcessEnvironment.build(function(name) { return Quickshell.env(name) }, true)
+  }
+
+  Process {
+    id: signinProc
+    clearEnvironment: true
+    environment: ProcessEnvironment.build(function(name) { return Quickshell.env(name) }, true)
+    // Detached so a bar reload cannot kill the protected supervisor before it
+    // cleans up its children. No credentials, output or child lifetime return
+    // to the bar; status polling observes the resulting mount independently.
+    command: ["/usr/bin/python3", "-Es", root.signinLauncher]
+  }
+
+  Process {
     id: actionProc
+    clearEnvironment: true
+    environment: ProcessEnvironment.build(function(name) { return Quickshell.env(name) }, true)
     stdout: SplitParser { onRead: function(data) {} }
     stderr: SplitParser { onRead: function(data) {} }
     onExited: function(exitCode) {
@@ -149,8 +179,6 @@ Panel {
       root.pendingAction = ""
       root.pendingProvider = ""
       root.actionFinished(action, provider, exitCode === 0, message)
-      if (provider === "icloud" && action === "reconnect-mount") wizard.mountFinished(exitCode === 0, message)
-      if (provider === "icloud" && action === "open") wizard.openFinished(exitCode === 0, message)
       root.refresh()
     }
   }
@@ -172,51 +200,26 @@ Panel {
     owner: root
     bar: root.bar
     open: root.opened
-    focusTarget: root.setupVisible ? wizard : contentFocus
+    focusTarget: contentFocus
     contentWidth: panel.fittedContentWidth(Style.space(390))
-    contentHeight: panel.fittedContentHeight(root.setupVisible ? wizard.implicitHeight : dashboard.implicitHeight, Style.space(660))
+    contentHeight: panel.fittedContentHeight(dashboard.implicitHeight, Style.space(660))
 
     FocusScope {
       id: contentFocus
       anchors.fill: parent
-      // Do not intercept typing with PanelKeyCatcher. Fields own their keys.
-      Keys.onEscapePressed: {
-        if (root.setupVisible) wizard.dismiss()
-        else root.close()
-      }
+      Keys.onEscapePressed: root.close()
 
       Flickable {
         anchors.fill: parent
         contentWidth: width
-        contentHeight: root.setupVisible ? wizard.implicitHeight : dashboard.implicitHeight
+        contentHeight: dashboard.implicitHeight
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
         Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
 
-        ICloudSetup {
-          id: wizard
-          width: parent.width
-          visible: root.setupVisible
-          active: root.setupVisible && root.opened
-          ready: root.ready
-          preparationError: root.stateError
-          provider: root.icloudProvider
-          foreground: root.foreground
-          onPrepareRequested: Quickshell.execDetached([root.script, "launch", "setup"])
-          onRefreshRequested: root.refresh()
-          onMountRequested: root.run("reconnect-mount", "icloud")
-          onOpenFolderRequested: root.run("open", "icloud")
-          onDismissed: {
-            root.setupVisible = false
-            root.refresh()
-            Qt.callLater(function() { refreshButton.forceActiveFocus() })
-          }
-        }
-
         Column {
           id: dashboard
-          visible: !root.setupVisible
           width: parent.width
           spacing: Style.space(16)
 

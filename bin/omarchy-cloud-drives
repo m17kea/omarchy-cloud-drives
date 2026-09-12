@@ -1,4 +1,5 @@
 #!/bin/bash
+set +x
 
 # Connect iCloud Drive, Google Drive and OneDrive as folders under ~/Cloud.
 #
@@ -19,17 +20,27 @@
 #     libsecret) and handed to rclone with --password-command; it is never
 #     written to disk in the clear or exported as a variable.
 #   * Google/OneDrive use OAuth in your browser; this script never sees the
-#     account password. iCloud has no OAuth: rclone needs your Apple ID
-#     password once (obscured into the encrypted config) plus a 2FA code.
-#     The password is handed to rclone over a private unix socket (rclone's
-#     rc API) so it never appears in any process's argv, environment, logs
-#     or temporary files. Apple requires the regular account password.
+#     account password. iCloud sign-in runs in a separate native window;
+#     this shell never collects Apple credentials. rclone retains the regular
+#     Apple password inside its encrypted config to renew expired sessions.
 #   * Mounts are private to your user (umask 077, no allow-other) and run as
 #     hardened systemd user units.
 
 set -euo pipefail
 
 PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Re-enter the dispatcher only after the Python launcher sanitizes the child
+# environment and applies inherited core-dump protections. Sourcing is an
+# internal implementation detail, not an alternate public entry point.
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  exec /usr/bin/python3 -Es "$PLUGIN_DIR/bin/protected-exec.py" /bin/bash --noprofile --norc \
+    -c 'source "$1" "${@:2}"' cloud-drives "$PLUGIN_DIR/bin/omarchy-cloud-drives" "$@"
+fi
+if [[ $(ulimit -Sc) != 0 || $(ulimit -Hc) != 0 || ! $(</proc/self/coredump_filter) =~ ^0+$ ]]; then
+  echo "Cloud Drives requires its protected launcher." >&2
+  return 1
+fi
+umask 077
 MOUNT_ROOT="$HOME/Cloud"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-cloud-drives"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-cloud-drives"
@@ -41,12 +52,13 @@ SECRET_ATTRS=(service omarchy-cloud-drives key config-password)
 # Do not inherit remote definitions, debug dumps, passwords or log locations
 # from unrelated rclone use in the user's session.
 for rclone_option in ${!RCLONE_@}; do unset "$rclone_option"; done
-export RCLONE_PASSWORD_COMMAND="secret-tool lookup ${SECRET_ATTRS[*]}"
+export RCLONE_PASSWORD_COMMAND="/usr/bin/secret-tool lookup ${SECRET_ATTRS[*]}"
 # Each provider owns a separate encrypted config. Never modify a user's
 # existing rclone setup or export a global decryption command.
 export RCLONE_CONFIG="$CONFIG_DIR/iCloudDrive.conf"
-# Resolve once per action. Only setup may download a private runtime.
-CLOUD_RCLONE_BIN="$(python3 "$PLUGIN_DIR/bin/cloud_drives_runtime.py" path 2>/dev/null || true)"
+# Resolved once at dispatch, except when launching isolated iCloud sign-in.
+# Only setup may download a private runtime.
+CLOUD_RCLONE_BIN=""
 
 # id | rclone remote name (= folder name under ~/Cloud) | backend | display name | glyph
 PROVIDERS=(
@@ -97,7 +109,7 @@ provider_field() { # provider_field <id> <n>
 remote_of()  { provider_field "$1" 2; }
 backend_of() { provider_field "$1" 3; }
 name_of()    { provider_field "$1" 4; }
-new_cache_id() { python3 -c 'import uuid; print(uuid.uuid4().hex)'; }
+new_cache_id() { /usr/bin/python3 -Es -c 'import uuid; print(uuid.uuid4().hex)'; }
 
 have_rclone()  { [[ -n $CLOUD_RCLONE_BIN && -x $CLOUD_RCLONE_BIN ]]; }
 have_secret()  { timeout 5 secret-tool lookup "${SECRET_ATTRS[@]}" >/dev/null 2>&1; }
@@ -153,7 +165,7 @@ ensure_rclone() {
     omarchy pkg add fuse3
   fi
   echo "Checking the Cloud Drives runtime..."
-  CLOUD_RCLONE_BIN="$(python3 "$PLUGIN_DIR/bin/cloud_drives_runtime.py" prepare)" || fail "Cloud Drives runtime preparation failed. Your system rclone was not changed."
+  CLOUD_RCLONE_BIN="$(/usr/bin/python3 -Es "$PLUGIN_DIR/bin/cloud_drives_runtime.py" prepare)" || fail "Cloud Drives runtime preparation failed. Your system rclone was not changed."
   have_rclone || fail "Cloud Drives runtime is unavailable."
   command -v secret-tool >/dev/null || fail "Login keyring support is missing (libsecret)."
 }
@@ -186,7 +198,7 @@ ensure_encrypted() {
 ensure_unit() {
   mkdir -p -m 0700 "$MOUNT_ROOT"
   [[ -d $MOUNT_ROOT && ! -L $MOUNT_ROOT ]] || fail "$MOUNT_ROOT is not a directory"
-  python3 "$PLUGIN_DIR/bin/render-unit.py" "$PLUGIN_DIR/systemd/${UNIT_NAME}.service" \
+  /usr/bin/python3 -Es "$PLUGIN_DIR/bin/render-unit.py" "$PLUGIN_DIR/systemd/${UNIT_NAME}.service" \
     "$CONFIG_DIR" "$MOUNT_ROOT" "$CACHE_DIR" "$PLUGIN_DIR/bin/mount-drive.py" "$DATA_HOME" | write_file "$UNIT_DIR/${UNIT_NAME}.service" 0644
   systemctl --user daemon-reload
 }
@@ -204,70 +216,11 @@ cmd_setup() {
 }
 
 # ---------------------------------------------------------------------------
-# Secrets must never be visible in argv (/proc/*/cmdline is world-readable).
-# rclone's CLI only takes remote parameters on the command line, so for
-# password-based backends we talk to rclone's rc API over a private unix
-# socket instead: the request body is built by jq from stdin and streamed
-# to curl from stdin, so the password only ever lives in this shell's
-# memory and in rclone's. The socket lives in a 0700 tmpfs directory for
-# the duration of the sign-in only.
-RC_DIR=""; RC_PID=""
-rc_start() {
-  local run="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-  RC_DIR="$(umask 077; mktemp -d "$run/omarchy-cloud-drives.XXXXXX")" || fail "cannot create private socket dir"
-  ( umask 077; exec "$CLOUD_RCLONE_BIN" rcd --rc-addr "unix://$RC_DIR/rc.sock" --rc-no-auth --rc-serve=false -q 2>/dev/null ) &
-  RC_PID=$!
-  local i
-  for i in $(seq 50); do [[ -S $RC_DIR/rc.sock ]] && return 0; sleep 0.1; done
-  rc_stop; fail "rclone rc did not start"
-}
-rc_stop() {
-  if [[ -n $RC_PID ]]; then kill "$RC_PID" 2>/dev/null || true; wait "$RC_PID" 2>/dev/null || true; RC_PID=""; fi
-  if [[ -n $RC_DIR ]]; then rm -rf "$RC_DIR"; RC_DIR=""; fi
-  return 0
-}
-rc_call() {  # rc_call <path>, JSON body on stdin, JSON reply on stdout
-  curl -s --fail-with-body --max-time 90 --unix-socket "$RC_DIR/rc.sock" -X POST \
-    -H 'Content-Type: application/json' --data-binary @- "http://rc/$1"
-}
-# Sign in to iCloud non-interactively: create the remote with the password in
-# the request body, then answer rclone's follow-up questions (the 2FA code).
-rc_configure_icloud() {  # <remote> <apple_id> <password>
-  local remote="$1" reply state opt_name opt_help answer
-  rc_start
-  trap rc_stop EXIT
-  reply="$(printf '%s\n%s\n' "$2" "$3" | jq -Rn --arg name "$remote" --arg cache_id "$(new_cache_id)" \
-    '[inputs] | {name:$name, type:"iclouddrive",
-      parameters:{apple_id:.[0], password:.[1], omarchy_cache_id:$cache_id},
-      opt:{obscure:true, nonInteractive:true}}' | rc_call config/create)" || {
-    echo "iCloud sign-in failed: $(jq -r '.error // "unknown error"' <<<"$reply")" >&2
-    rc_stop; return 1; }
-  while :; do
-    state="$(jq -r '.State // ""' <<<"$reply")"
-    if [[ -n "$(jq -r '.Error // ""' <<<"$reply")" ]]; then
-      echo "iCloud sign-in failed: $(jq -r .Error <<<"$reply")" >&2; rc_stop; return 1
-    fi
-    [[ -n $state ]] || break
-    opt_name="$(jq -r '.Option.Name // ""' <<<"$reply")"
-    opt_help="$(jq -r '.Option.Help // ""' <<<"$reply")"
-    [[ -n $opt_help ]] && echo "$opt_help"
-    if [[ $opt_name == *2fa* || $opt_name == *code* ]]; then
-      answer="$(gum input --placeholder "2FA code")"
-    else
-      answer="$(gum input --placeholder "${opt_name:-answer}")"
-    fi
-    reply="$(printf '%s\n%s\n' "$state" "$answer" | jq -Rn --arg name "$remote" \
-      '[inputs] | {name:$name, parameters:{}, opt:{continue:true, nonInteractive:true, state:.[0], result:.[1]}}' \
-      | rc_call config/update)" || {
-      echo "iCloud sign-in failed: $(jq -r '.error // "unknown error"' <<<"$reply")" >&2
-      rc_stop; return 1; }
-  done
-  rc_stop; trap - EXIT
-}
-
-# ---------------------------------------------------------------------------
 cmd_connect() {
   local id="$1" remote backend name
+  if [[ $id == icloud ]]; then
+    exec /usr/bin/python3 -Es "$PLUGIN_DIR/bin/icloud-signin.py"
+  fi
   remote="$(remote_of "$id")"; backend="$(backend_of "$id")"; name="$(name_of "$id")"
   cmd_setup
   select_provider "$id"
@@ -284,22 +237,6 @@ cmd_connect() {
       onedrive)
         echo "A browser window will open for Microsoft sign-in, then pick your drive."
         "$CLOUD_RCLONE_BIN" config create "$remote" onedrive omarchy_cache_id="$(new_cache_id)"
-        ;;
-      icloud)
-        echo "iCloud has no OAuth: rclone signs in with your Apple ID and a 2FA code."
-        echo "Use your regular Apple Account password. App-specific passwords are not accepted."
-        echo "Advanced Data Protection can stay on. Allow iCloud web access and approve your trusted device when prompted."
-        local apple_id pw
-        apple_id="$(gum input --placeholder "Apple ID (email)")"
-        [[ -n $apple_id ]] || fail "no Apple ID given"
-        pw="$(gum input --password --placeholder "Password")"
-        [[ -n $pw ]] || fail "no password given"
-        if ! rc_configure_icloud "$remote" "$apple_id" "$pw"; then
-          unset pw
-          "$CLOUD_RCLONE_BIN" config delete "$remote" 2>/dev/null || true
-          fail "could not sign in to iCloud"
-        fi
-        unset pw
         ;;
     esac
     configured "$id" || fail "$name was not configured"
@@ -343,6 +280,9 @@ cmd_reconnect_mount() {
 
 cmd_reconnect() {
   local id="$1"
+  if [[ $id == icloud ]]; then
+    exec /usr/bin/python3 -Es "$PLUGIN_DIR/bin/icloud-signin.py"
+  fi
   configured "$id" || fail "Connect this account first."
   timeout 50 systemctl --user stop "$(unit_of "$id")" || fail "Could not stop the current connection."
   echo "Approve the sign-in request on your trusted device when asked."
@@ -382,6 +322,13 @@ cmd_launch() {
 }
 
 # ---------------------------------------------------------------------------
+# Opening iCloud sign-in must not run setup, query/decrypt a config, or even
+# probe rclone. The isolated launcher owns its preparation and authentication.
+case "${1:-}:${2:-}" in
+  connect:icloud|reconnect:icloud) ;;
+  *) CLOUD_RCLONE_BIN="$(/usr/bin/python3 -Es "$PLUGIN_DIR/bin/cloud_drives_runtime.py" path 2>/dev/null || true)" ;;
+esac
+
 case "${1:-}" in
   state)      cmd_state ;;
   setup)      cmd_setup ;;
@@ -393,5 +340,5 @@ case "${1:-}" in
   unmount)    cmd_unmount "${2:?provider}" ;;
   open)       cmd_open "${2:?provider}" ;;
   launch)     shift; cmd_launch "$@" ;;
-  *) sed -n '3,20p' "$0"; exit 1 ;;
+  *) sed -n '3,20p' "${BASH_SOURCE[0]}"; exit 1 ;;
 esac

@@ -7,12 +7,15 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
 import zipfile
+from contextlib import contextmanager
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 SPEC = importlib.util.spec_from_file_location(
     "cloud_drives_runtime", Path(__file__).resolve().parents[1] / "bin" / "cloud_drives_runtime.py"
 )
@@ -58,23 +61,88 @@ class RuntimeTests(unittest.TestCase):
                 mock.patch.object(runtime, "BINARY_SHA256", hashlib.sha256(BINARY).hexdigest()),
                 mock.patch.object(runtime, "_download", side_effect=download))
 
+    @contextmanager
+    def system_fixture(self, version=b"rclone v1.75.1\n", uid=0, mode=stat.S_IFREG | 0o755):
+        """A real inert file with synthetic root ownership; never execute it."""
+        candidate = self.root / "distribution-rclone"
+        candidate.write_bytes(BINARY)
+        candidate.chmod(0o755)
+        real_stat = os.stat
+
+        def system_stat(path, *args, **kwargs):
+            info = real_stat(path, *args, **kwargs)
+            if Path(path) == candidate:
+                fields = list(info)
+                fields[0], fields[4] = mode, uid
+                return os.stat_result(fields)
+            return info
+
+        result = subprocess.CompletedProcess([], 0, stdout=version)
+        with mock.patch.object(runtime.shutil, "which", return_value=str(candidate)) as which, \
+             mock.patch.object(runtime.os, "stat", side_effect=system_stat), \
+             mock.patch.object(runtime.subprocess, "run", return_value=result) as run:
+            yield candidate, which, run
+
     def test_system_minimum_and_prerelease_rejection(self):
         for version, supported in ((b"rclone v1.75.0\n", False), (b"rclone v1.75.1\n", True),
                                    (b"rclone v1.76.0\n", True), (b"rclone v1.76.0-beta\n", False)):
             with self.subTest(version=version):
-                result = subprocess.CompletedProcess([], 0, stdout=version)
-                with mock.patch.object(runtime.shutil, "which", return_value="/usr/bin/rclone"), mock.patch.object(runtime.subprocess, "run", return_value=result):
+                with self.system_fixture(version) as (candidate, which, run):
                     if supported:
-                        self.assertEqual(runtime.resolve_rclone(), "/usr/bin/rclone")
+                        self.assertEqual(runtime.resolve_rclone(), str(candidate))
                     else:
                         with self.assertRaises(runtime.RuntimeUnavailable):
                             runtime.resolve_rclone()
+                    which.assert_called_once_with("rclone", path="/usr/bin:/bin")
+                    self.assertEqual(run.call_args.args[0], [str(candidate), "version"])
 
-    def test_version_probe_scrubs_ambient_rclone_options(self):
-        result = subprocess.CompletedProcess([], 0, stdout=b"rclone v1.75.1\n")
-        with mock.patch.dict(os.environ, {"RCLONE_DUMP": "auth", "RCLONE_PASSWORD_COMMAND": "untrusted"}), mock.patch.object(runtime.shutil, "which", return_value="/usr/bin/rclone"), mock.patch.object(runtime.subprocess, "run", return_value=result) as run:
+    def test_version_probe_uses_shared_safe_environment(self):
+        unsafe = {"RCLONE_DUMP": "auth", "RCLONE_PASSWORD_COMMAND": "untrusted",
+                  "LD_PRELOAD": "/fixture/inject.so", "HTTPS_PROXY": "http://fixture",
+                  "SSL_CERT_FILE": "/fixture/ca", "SSLKEYLOGFILE": "/fixture/keylog",
+                  "PYTHONPATH": "/fixture/python", "PATH": "/fixture/bin"}
+        with mock.patch.dict(os.environ, unsafe), self.system_fixture() as (_, _, run):
             runtime.resolve_rclone()
-        self.assertFalse(any(name.startswith("RCLONE_") for name in run.call_args.kwargs["env"]))
+            self.assertEqual(run.call_args.kwargs["env"], runtime.safe_environment())
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(environment["PATH"], "/usr/bin:/bin")
+        for name in unsafe.keys() - {"PATH"}:
+            self.assertNotIn(name, environment)
+
+    def test_user_path_rclone_is_never_selected_or_executed(self):
+        commands = self.root / "untrusted-bin"
+        commands.mkdir()
+        (commands / "rclone").write_bytes(BINARY)
+        (commands / "rclone").chmod(0o700)
+        # The controlled lookup exposes the impostor only to an ambient PATH
+        # lookup. This remains host-independent even if CI has system rclone.
+        def lookup(command, path=None):
+            self.assertEqual(command, "rclone")
+            return str(commands / "rclone") if path is None else None
+        with mock.patch.dict(os.environ, {"PATH": str(commands)}), \
+             mock.patch.object(runtime.shutil, "which", side_effect=lookup) as which, \
+             mock.patch.object(runtime.subprocess, "run") as run:
+            with self.assertRaises(runtime.RuntimeUnavailable):
+                runtime.resolve_rclone()
+            which.assert_called_once_with("rclone", path="/usr/bin:/bin")
+            run.assert_not_called()
+
+    def test_system_candidate_must_be_regular_root_owned_and_not_writable_by_others(self):
+        for uid, mode in ((1000, stat.S_IFREG | 0o755), (0, stat.S_IFREG | 0o775),
+                          (0, stat.S_IFREG | 0o757), (0, stat.S_IFREG | 0o644),
+                          (0, stat.S_IFDIR | 0o755), (0, stat.S_IFLNK | 0o755)):
+            with self.subTest(uid=uid, mode=oct(mode)), self.system_fixture(uid=uid, mode=mode) as (_, _, run):
+                with self.assertRaises(runtime.RuntimeUnavailable):
+                    runtime.resolve_rclone()
+                run.assert_not_called()
+
+    def test_system_symlink_is_checked_and_executed_by_resolved_target(self):
+        with self.system_fixture() as (candidate, which, run):
+            link = self.root / "system-link"
+            link.symlink_to(candidate)
+            which.return_value = str(link)
+            self.assertEqual(runtime.resolve_rclone(), str(candidate))
+            self.assertEqual(run.call_args.args[0], [str(candidate), "version"])
 
     def test_prepare_installs_verified_binary_and_license_then_reuses_it(self):
         checksum, binary_hash, downloader = self.prepared_fixture()
@@ -160,6 +228,21 @@ class RuntimeTests(unittest.TestCase):
         opener.open.return_value = response
         with mock.patch.object(runtime.urllib.request, "build_opener", return_value=opener), self.assertRaisesRegex(runtime.RuntimeUnavailable, "larger"):
             runtime._download(self.root / "archive.zip")
+
+    def test_download_disables_ambient_proxies(self):
+        payload = b"verified download fixture"
+        response = io.BytesIO(payload)
+        response.headers = {"Content-Length": str(len(payload))}
+        opener = mock.Mock()
+        opener.open.return_value = response
+        with mock.patch.dict(os.environ, {"HTTP_PROXY": "http://untrusted", "https_proxy": "http://untrusted"}), \
+             mock.patch.object(runtime, "ASSET_SHA256", hashlib.sha256(payload).hexdigest()), \
+             mock.patch.object(runtime.urllib.request, "build_opener", return_value=opener) as build:
+            runtime._download(self.root / "archive.zip")
+        proxies = [handler for handler in build.call_args.args
+                   if isinstance(handler, runtime.urllib.request.ProxyHandler)]
+        self.assertEqual(len(proxies), 1)
+        self.assertEqual(proxies[0].proxies, {})
 
     def test_redirects_must_stay_on_official_https_hosts(self):
         redirects = runtime._OfficialRedirects()

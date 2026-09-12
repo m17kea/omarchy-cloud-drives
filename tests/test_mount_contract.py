@@ -1,3 +1,4 @@
+import configparser
 import importlib.util
 from pathlib import Path
 import sys
@@ -21,6 +22,21 @@ mount = load("mount_drive", "mount-drive.py")
 
 
 class MountContract(unittest.TestCase):
+    def test_unit_protects_before_interpreter_and_suppresses_output(self):
+        config = configparser.ConfigParser(interpolation=None)
+        config.read(ROOT / 'systemd/omarchy-cloud-drive@.service')
+        service = config['Service']
+        self.assertEqual(service['LimitCORE'], '0')
+        self.assertEqual(service['CoredumpFilter'], '0x0')
+        self.assertEqual(service['StandardOutput'], 'null')
+        self.assertEqual(service['StandardError'], 'null')
+        self.assertTrue(service['ExecStart'].startswith('/usr/bin/python3 -Es '))
+        self.assertTrue({'LD_PRELOAD', 'LD_AUDIT', 'LD_LIBRARY_PATH', 'LD_DEBUG',
+                         'LD_DEBUG_OUTPUT', 'LD_PROFILE', 'LD_PROFILE_OUTPUT',
+                         'LD_TRACE_LOADED_OBJECTS', 'GLIBC_TUNABLES', 'GCONV_PATH',
+                         'LOCPATH'} <= set(service['UnsetEnvironment'].split()))
+        self.assertNotIn('NoNewPrivileges', service)
+
     def test_unit_paths_do_not_expand_specifiers_or_environment(self):
         template = 'ExecStart="@WORKER@" %i "@CONFIG@" "@MOUNT@" "@CACHE@"'
         value = '/tmp/space path/quote"/percent%/dollar$NAME/slash\\'
@@ -57,11 +73,13 @@ class MountContract(unittest.TestCase):
             result = mock.Mock(stdout=b'[iCloudDrive]\nomarchy_cache_id = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n')
             argv = ['mount-drive.py', 'iCloudDrive', str(root / 'config'), str(root / 'mount'), str(root / 'cache')]
             with mock.patch.object(mount, 'resolve_rclone', return_value='/private/rclone'), \
+                 mock.patch.object(mount, 'protect_process') as protect, \
                  mock.patch.object(mount.sys, 'argv', argv), \
                  mock.patch.dict(mount.os.environ, {'NOTIFY_SOCKET': '/run/user/test/notify', 'RCLONE_DUMP': 'auth'}), \
                  mock.patch.object(mount.subprocess, 'run', return_value=result) as run, \
                  mock.patch.object(mount.os, 'execve') as execute:
                 mount.main()
+            protect.assert_called_once_with()
             self.assertEqual(run.call_args.args[0][0], '/private/rclone')
             self.assertEqual(execute.call_args.args[0], '/private/rclone')
             env = execute.call_args.args[2]

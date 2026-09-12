@@ -27,10 +27,42 @@ Tested on Omarchy 4.0.2, Linux x86-64 with packaged rclone 1.75.0:
 These checks do not establish successful Apple authentication or file sync.
 The 48-test isolated suite passed, including the real local rclone RC contract.
 
+## Credential hardening checks (2026-09-12)
+
+After the preparation check above, the credential UI was moved out of the
+shared bar into a separately supervised process. The legacy Bash/curl Apple
+password flow was removed. The updated isolated suite passed 85 tests,
+including the pinned official archive and real local rclone RC contract.
+
+Additional checks cover:
+
+- Hard/soft core limits of zero, a zero memory-dump filter, and disabled
+  dumpability in disposable Python children; verification that the first two
+  survive execution and that Linux resets dumpability on execution.
+- Fixed-path runtime selection, rejected user-PATH substitutes, sanitized
+  environments, fail-closed protection failures and suppressed child output.
+- Mount unit settings remove known loader/debug variables before Python starts,
+  in addition to the later child-environment allowlist.
+- Detached sign-in ownership and a single 25-second descendant cleanup budget,
+  including simulated slow helpers after the UI leader has already exited.
+- Fixed, bounded failure notifications; no raw exception or account data.
+- `bash tests/qml/run-smoke.sh`: actual offscreen Omarchy controls with a mock
+  helper, checking masking, password/code clearing, cancellation, window close
+  and removal of an inherited environment marker. This uses synthetic inputs,
+  not Apple, the login keyring or a real account. The headless platform emits
+  expected IPC/window-mask warnings; it is not a live compositor test.
+- Bash syntax, Omarchy manifest validation and whitespace checks.
+
+No credential-bearing crash was triggered and no existing crash memory was
+read. Automated and agent-assisted review is not an independent security
+audit. See [remaining risks](SECURITY.md).
+
 ## Live-account release gate
 
 The following have **not** been completed in the automated development session:
 
+- Independent security review, including upstream iCloud endpoint/redirect
+  handling and the documented desktop/keyring trust assumptions.
 - Broader clean-machine preparation and locked/unlocked keyring behavior
   (one successful live preparation is recorded above).
 - Apple login, rejected password/code, trusted-device and SMS flows.

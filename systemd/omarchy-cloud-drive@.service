@@ -10,9 +10,16 @@ PartOf=graphical-session.target
 [Service]
 Type=notify
 Environment="XDG_DATA_HOME=@DATA@"
+# The user manager may have imported these settings. Remove loader/debug
+# controls before Python starts; sanitizing worker children is too late here.
+UnsetEnvironment=LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH LD_DEBUG LD_DEBUG_OUTPUT LD_PROFILE LD_PROFILE_OUTPUT LD_TRACE_LOADED_OBJECTS GLIBC_TUNABLES GCONV_PATH LOCPATH
 # Worker removes inherited rclone options and selects the account-specific
 # cache recorded inside the encrypted config, then execs rclone in this PID.
-ExecStart=/usr/bin/python3 "@WORKER@" %i "@CONFIG@" "@MOUNT@" "@CACHE@"
+ExecStart=/usr/bin/python3 -Es "@WORKER@" %i "@CONFIG@" "@MOUNT@" "@CACHE@"
+LimitCORE=0
+CoredumpFilter=0x0
+StandardOutput=null
+StandardError=null
 KillSignal=SIGINT
 TimeoutStopSec=40
 Restart=on-failure

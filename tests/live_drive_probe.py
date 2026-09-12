@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -Es
 """Opt-in live test: create only a unique test directory; retain it for inspection.
 
 This writes to the connected iCloud account. It never scans or modifies existing
@@ -17,6 +17,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 from cloud_drives_runtime import resolve_rclone
+from cloud_drives_security import protect_process, safe_environment
 
 def emit(message):
     print(message, flush=True)
@@ -30,10 +31,10 @@ def save(path, data):
 
 
 def verify_remote(remote_path, expected, config, binary, deadline_seconds=90):
-    env = {key: value for key, value in os.environ.items() if not key.startswith("RCLONE_")}
+    env = safe_environment()
     command = [binary, "cat", "iCloudDrive:" + remote_path,
                "--config", str(config), "--password-command",
-               "secret-tool lookup service omarchy-cloud-drives key config-password",
+               "/usr/bin/secret-tool lookup service omarchy-cloud-drives key config-password",
                "--ask-password=false", "--retries", "1", "--low-level-retries", "1",
                "--contimeout", "5s", "--timeout", "10s"]
     deadline = time.monotonic() + deadline_seconds
@@ -55,6 +56,7 @@ def main():
     args = parser.parse_args()
     if not args.run:
         parser.error("Pass --run only after authorizing writes to a new iCloud test directory.")
+    protect_process()
     if not args.mount.is_mount():
         parser.error("The selected directory is not a mounted filesystem.")
     config_root = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")

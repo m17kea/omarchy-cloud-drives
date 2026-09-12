@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -Es
 """Private NDJSON bridge for iCloud sign-in; no credentials go through argv.
 
 Input: begin(email, password), answer(answer), cancel. Output: working,
@@ -32,10 +32,11 @@ import time
 import uuid
 
 from cloud_drives_runtime import RuntimeUnavailable, resolve_rclone
+from cloud_drives_security import SecurityError, protect_process, safe_environment
 
 REMOTE = "iCloudDrive"
 UNIT = "omarchy-cloud-drive@iCloudDrive.service"
-PASSWORD_COMMAND = "secret-tool lookup service omarchy-cloud-drives key config-password"
+PASSWORD_COMMAND = "/usr/bin/secret-tool lookup service omarchy-cloud-drives key config-password"
 MAX_INPUT = 16 * 1024
 MAX_RESPONSE = 2 * 1024 * 1024
 REQUEST_TIMEOUT = 50
@@ -99,7 +100,7 @@ def classify_error(raw):
 def clean_environment():
     # Ambient rclone options can otherwise select another config, export
     # secrets as remotes, enable debug dumps, or start extra RC listeners.
-    return {key: value for key, value in os.environ.items() if not key.startswith("RCLONE_")}
+    return safe_environment()
 
 
 def read_ciphertext(path):
@@ -508,6 +509,10 @@ def run(input_stream=None, emit=emit_event, flow_factory=Onboarding):
                     flow.cancel()
                     return
                 messages.put_nowait(command)
+                # Do not retain the full input JSON while blocking on the next
+                # line. Python strings still cannot promise secure zeroization.
+                line = None
+                command = None
             except (ValueError, UnicodeError, queue.Full, OSError):
                 flow.cancel()
                 return
@@ -572,4 +577,9 @@ def run(input_stream=None, emit=emit_event, flow_factory=Onboarding):
 
 
 if __name__ == "__main__":
+    try:
+        protect_process()
+    except (SecurityError, OSError):
+        emit_event(phase="error", code="setup_required", message=MESSAGES["setup_required"])
+        raise SystemExit(1)
     raise SystemExit(run())

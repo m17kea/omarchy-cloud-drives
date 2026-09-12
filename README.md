@@ -10,12 +10,15 @@ a separate marketplace listing.
 
 ## What is new
 
-- Native iCloud account and verification screens inside the Omarchy panel.
+- Native iCloud account and verification screens in a separate, short-lived
+  window using Omarchy's theme and controls; credentials never enter the bar.
 - Preparation through Omarchy's normal terminal and package prompt.
 - A verified private rclone fallback when the system package is too old.
 - A Reconnect action, visible errors, progress, and Open folder after mounting.
 - A separate encrypted configuration for each provider, leaving existing rclone setups alone.
 - Staged iCloud authentication: failure or cancellation preserves the current account.
+- Protected credential-handling processes, inherited core-dump restrictions,
+  and explicit child-environment allowlists. See the [security model](docs/SECURITY.md).
 
 Google Drive and OneDrive retain their browser sign-in via a floating terminal.
 
@@ -27,7 +30,8 @@ Preview rendered from the native Omarchy components, with placeholder fields.
 
 This is a development preview. Tests exercise the protocol with simulated Apple
 responses and a pinned local rclone. Real Apple sign-in, trusted-device approval,
-and a cross-device file round trip are required before release. See
+and a cross-device file round trip are required before release. An independent
+security review is also outstanding; this is not compromise-proof. See
 [validation](docs/VALIDATION.md).
 
 ## Install for testing
@@ -50,7 +54,7 @@ Reconnect accounts in the new panel. Do not run both versions' services together
 ## Connect iCloud
 
 1. Click the cloud in the bar, then **Connect** beside iCloud Drive.
-2. Prepare this computer if prompted. Return to the panel and check again.
+2. Prepare this computer if prompted. Return to the sign-in window and check again.
 3. Enter your Apple Account email and **regular account password**.
 4. Enter the verification code or approve access on your trusted Apple device.
 5. Open `~/Cloud/iCloudDrive` when the mount is ready.
@@ -79,10 +83,22 @@ Use independent backups and test concurrent edits before using critical files.
 The login keyring stores a random encryption key under
 `service=omarchy-cloud-drives key=config-password`. rclone reads it through
 `RCLONE_PASSWORD_COMMAND`. Each provider config is encrypted and mode 0600.
-Apple's password is stored obscured inside that encrypted file with its session
-credentials. Native input travels over stdin and a private Unix socket, never
-process arguments. The helper emits curated status messages instead of raw
-authentication responses.
+Apple's password is stored reversibly obscured inside that encrypted file with
+its session credentials. The login keyring is not an application sandbox: other
+programs running as your user may be able to obtain the same encryption key.
+This client therefore trusts your user account, installed code and operating
+system with your primary Apple password.
+
+Native input stays in a dedicated sign-in process and travels to its helper
+over stdin and a private Unix socket, never process arguments. The shared bar
+does not host credential fields. The helper emits curated status messages;
+raw authentication output and mount stdout/stderr are suppressed. Process
+launchers set zero core-size limits and memory-mapping filters,
+and remove inherited debug, proxy, TLS-override and code-loading variables.
+These measures reduce accidental exposure, not eliminate all compromise risk.
+Read the [security model and outstanding review items](docs/SECURITY.md) before
+using a primary account. Do not paste credentials through a clipboard manager
+that retains history.
 
 | Location | Purpose |
 | --- | --- |
@@ -91,6 +107,7 @@ authentication responses.
 | `$XDG_CACHE_HOME/omarchy-cloud-drives` | Cached files and pending uploads |
 | `$XDG_DATA_HOME/omarchy-cloud-drives/runtime` | Private rclone fallback, when needed |
 | `$XDG_RUNTIME_DIR/omarchy-cloud-drives-*` | Temporary private authentication state |
+| `$XDG_RUNTIME_DIR/omarchy-icloud-window-*` | Temporary sign-in UI code, no credentials |
 | `~/Cloud/<Remote>` | Mount points |
 
 XDG config/cache/data paths default to `~/.config`, `~/.cache` and `~/.local/share`. No global rclone
@@ -101,7 +118,7 @@ cache, while reconnecting the same account retains pending writes. Old caches
 are retained for recovery and are not automatically deleted.
 
 Dependencies: rclone **1.75.1+**, fuse3, Python 3, libsecret (`secret-tool`), an
-unlocked login keyring, gum, jq, curl, and systemd. Preparation installs missing
+unlocked login keyring, gum, jq, Quickshell, and systemd. Preparation installs missing
 fuse3 with `omarchy pkg add`. If no compatible rclone is available, it downloads
 the pinned official Linux x86-64 release into the private runtime directory,
 verifies its SHA-256 checksum before installation, and leaves the system package
@@ -126,9 +143,11 @@ bin/omarchy-cloud-drives unmount icloud
 bin/omarchy-cloud-drives open icloud
 ```
 
-Other provider IDs are `google` and `onedrive`. Inspect mount failures with
-`systemctl --user status omarchy-cloud-drive@iCloudDrive.service` and
-`journalctl --user -u omarchy-cloud-drive@iCloudDrive.service --since today`.
+Other provider IDs are `google` and `onedrive`. Inspect service state and exit
+codes with `systemctl --user status omarchy-cloud-drive@iCloudDrive.service`.
+Raw mount logs are deliberately suppressed because upstream errors can include
+server data. Do not enable rclone request/response dumps with a real account or
+attach decrypted configuration to a bug report.
 
 To remove: close files, confirm uploads in the cloud, **Forget** each connected
 account, then run `omarchy plugin remove edbron.cloud-drives`. Forget stops the
@@ -143,6 +162,8 @@ shared rclone/environment files are not managed by this fork.
 python3 -m unittest discover -s tests -v
 bash -n bin/omarchy-cloud-drives
 omarchy plugin validate .
+# Optional: installed Omarchy UI kit, synthetic input only
+bash tests/qml/run-smoke.sh
 ```
 
 See [design notes](docs/DESIGN.md) and [validation](docs/VALIDATION.md).

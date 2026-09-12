@@ -22,6 +22,8 @@ import urllib.parse
 import urllib.request
 import zipfile
 
+from cloud_drives_security import safe_environment
+
 
 MINIMUM_VERSION = (1, 75, 1)
 VERSION = "1.75.1"
@@ -43,7 +45,7 @@ class RuntimeUnavailable(Exception):
 
 
 def _environment():
-    return {key: value for key, value in os.environ.items() if not key.startswith("RCLONE_")}
+    return safe_environment()
 
 
 def _check_directory(path, private):
@@ -112,18 +114,25 @@ def _private_binary(location):
 
 
 def _system_binary():
-    candidate = shutil.which("rclone")
+    # Only the distribution-managed search path is eligible. Never execute a
+    # user PATH entry merely to ask whether it claims to be a recent rclone.
+    candidate = shutil.which("rclone", path="/usr/bin:/bin")
     if not candidate:
         return None
     try:
-        result = subprocess.run([candidate, "version"], stdin=subprocess.DEVNULL,
+        resolved = Path(candidate).resolve(strict=True)
+        info = os.stat(resolved, follow_symlinks=False)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                or info.st_mode & 0o022 or not info.st_mode & 0o111):
+            return None
+        result = subprocess.run([str(resolved), "version"], stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                 timeout=5, check=False, env=_environment())
         first_line = result.stdout[:4096].split(b"\n", 1)[0]
         match = re.fullmatch(rb"rclone v([0-9]+)\.([0-9]+)\.([0-9]+)\s*", first_line)
         if result.returncode == 0 and match and tuple(int(value) for value in match.groups()) >= MINIMUM_VERSION:
-            return str(Path(candidate).resolve())
-    except (OSError, subprocess.TimeoutExpired, ValueError):
+            return str(resolved)
+    except (OSError, subprocess.TimeoutExpired, ValueError, RuntimeError):
         pass
     return None
 
@@ -152,7 +161,9 @@ class _OfficialRedirects(urllib.request.HTTPRedirectHandler):
 
 
 def _download(destination):
-    opener = urllib.request.build_opener(_OfficialRedirects())
+    # Preparation is deliberately direct HTTPS: an inherited proxy must not
+    # change the provenance boundary for the pinned official release.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _OfficialRedirects())
     request = urllib.request.Request(ASSET_URL, headers={"User-Agent": "Omarchy-Cloud-Drives"})
     deadline = time.monotonic() + DOWNLOAD_TIMEOUT
     digest = hashlib.sha256()

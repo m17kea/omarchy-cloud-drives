@@ -431,7 +431,7 @@ class RcloneContractTests(unittest.TestCase):
             env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", "")
             encrypted = subprocess.run(
                 [str(binary), "config", "encryption", "set", "--config", str(config),
-                 "--password-command", bridge.PASSWORD_COMMAND, "--ask-password=false"],
+                 "--password-command", str(secret_tool), "--ask-password=false"],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 env=env, timeout=10, check=False,
             )
@@ -439,7 +439,9 @@ class RcloneContractTests(unittest.TestCase):
             self.assertIn(bridge.ENCRYPTED_MARKER, bridge.read_ciphertext(config))
             server = bridge.RCServer(config, runtime, threading.Event())
             try:
-                with mock.patch.dict(os.environ, env, clear=True):
+                with mock.patch.dict(os.environ, env, clear=True), \
+                     mock.patch.object(bridge, 'resolve_rclone', return_value=str(binary)), \
+                     mock.patch.object(bridge, 'PASSWORD_COMMAND', str(secret_tool)):
                     server.start()
                 created = server.call("config/create", {"name": "ContractTest", "type": "local",
                                       "parameters": {"omarchy_cache_id": "a" * 32},

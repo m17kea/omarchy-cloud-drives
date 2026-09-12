@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -Es
 """Run one private mount with an account-specific cache and clean rclone options."""
 import configparser
 import os
@@ -8,8 +8,9 @@ import subprocess
 import sys
 
 from cloud_drives_runtime import RuntimeUnavailable, resolve_rclone
+from cloud_drives_security import SecurityError, protect_process, safe_environment
 REMOTES = {"iCloudDrive", "GoogleDrive", "OneDrive"}
-PASSWORD_COMMAND = "secret-tool lookup service omarchy-cloud-drives key config-password"
+PASSWORD_COMMAND = "/usr/bin/secret-tool lookup service omarchy-cloud-drives key config-password"
 
 
 def mount_command(remote, cache_id, mount_root, cache_root, binary):
@@ -20,15 +21,16 @@ def mount_command(remote, cache_id, mount_root, cache_root, binary):
             "--vfs-cache-mode", "full", "--vfs-cache-max-size", "4G",
             "--vfs-cache-max-age", "72h", "--dir-cache-time", "30s",
             "--poll-interval", "15s", "--umask", "077", "--allow-other=false",
-            "--log-level", "NOTICE", "--ask-password=false"]
+            "--log-level", "ERROR", "--log-file", os.devnull, "--ask-password=false"]
 
 
 def main():
+    protect_process()
     if len(sys.argv) != 5 or sys.argv[1] not in REMOTES:
         raise ValueError("Invalid mount request.")
     remote, config_root, mount_root, cache_root = sys.argv[1:]
     binary = resolve_rclone()
-    env = {k: v for k, v in os.environ.items() if not k.startswith("RCLONE_")}
+    env = safe_environment()
     env.update(RCLONE_CONFIG=str(Path(config_root) / (remote + ".conf")),
                RCLONE_PASSWORD_COMMAND=PASSWORD_COMMAND)
     # This output includes credentials: keep it in memory and never log it.
@@ -51,7 +53,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (ValueError, OSError, RuntimeUnavailable, subprocess.SubprocessError, configparser.Error):
+    except (ValueError, OSError, SecurityError, RuntimeUnavailable, subprocess.SubprocessError, configparser.Error):
         # Do not include exception text; subprocess arguments/config may contain secrets.
         print("Cloud drive could not start. Unlock the keyring or reconnect the account.", file=sys.stderr)
         sys.exit(1)

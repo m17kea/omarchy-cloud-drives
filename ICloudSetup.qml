@@ -1,7 +1,9 @@
 import QtQuick
+import Quickshell
 import Quickshell.Io
 import qs.Ui
 import qs.Commons
+import "ProcessEnvironment.js" as ProcessEnvironment
 
 // Credentials travel over private pipes, never through argv or shell settings.
 FocusScope {
@@ -12,7 +14,8 @@ FocusScope {
   property var provider: ({})
   property color foreground: Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.5)
-  readonly property string helper: decodeURIComponent(String(Qt.resolvedUrl("bin/icloud-onboarding.py")).replace(/^file:\/\//, ""))
+  property string helper: decodeURIComponent(String(Qt.resolvedUrl("bin/icloud-onboarding.py")).replace(/^file:\/\//, ""))
+  readonly property bool helperRunning: bridge.running
   property string step: "welcome"
   property string message: ""
   property string challengeTitle: "Verify your account"
@@ -40,7 +43,7 @@ FocusScope {
     message = ""
     preparationLaunched = false
     folderError = false
-    emailField.text = ""
+    emailField.clear()
     Qt.callLater(focusStep)
   }
 
@@ -55,8 +58,8 @@ FocusScope {
   function cancel() {
     cancelled = true
     pendingBegin = ""
-    passwordField.text = ""
-    answerField.text = ""
+    passwordField.clear()
+    answerField.clear()
     startupTimer.stop()
     if (bridge.running) {
       bridge.write(JSON.stringify({ op: "cancel" }) + "\n")
@@ -77,7 +80,7 @@ FocusScope {
     cancelled = false
     eventCount = 0
     pendingBegin = JSON.stringify({ op: "begin", email: emailField.text.trim(), password: passwordField.text })
-    passwordField.text = ""
+    passwordField.clear()
     message = "Connecting securely to Apple…"
     step = "working"
     bridge.running = true
@@ -89,7 +92,7 @@ FocusScope {
     var answer = overrideAnswer !== undefined ? overrideAnswer : (challengeKind === "approval" ? "continue" : answerField.text)
     if (!answer || (overrideAnswer === undefined && challengeKind === "code" && answer.length !== 6)) return
     bridge.write(JSON.stringify({ op: "answer", answer: answer }) + "\n")
-    answerField.text = ""
+    answerField.clear()
     message = "Checking with Apple…"
     step = "working"
   }
@@ -113,11 +116,11 @@ FocusScope {
         message = String(event.message || "Approve the request on a trusted Apple device.").slice(0, 600)
         challengePassword = event.password === true
         smsAvailable = event.smsAvailable === true
-        answerField.text = ""
+        answerField.clear()
         step = "challenge"
       } else if (phase === "connected") {
-        passwordField.text = ""
-        answerField.text = ""
+        passwordField.clear()
+        answerField.clear()
         message = "Your account is connected. Opening your iCloud folder…"
         step = "mounting"
         refreshRequested()
@@ -176,7 +179,9 @@ FocusScope {
 
   Process {
     id: bridge
-    command: ["python3", root.helper]
+    clearEnvironment: true
+    environment: ProcessEnvironment.build(function(name) { return Quickshell.env(name) }, false)
+    command: ["/usr/bin/python3", "-Es", root.helper]
     stdinEnabled: true
     onStarted: {
       startupTimer.stop()
@@ -277,6 +282,7 @@ FocusScope {
         placeholderText: "Apple Account password"
         foreground: root.foreground
         password: true
+        passwordMaskDelay: 0
         maximumLength: 1024
         inputMethodHints: Qt.ImhSensitiveData | Qt.ImhNoPredictiveText
         KeyNavigation.tab: primaryButton
@@ -285,7 +291,7 @@ FocusScope {
       }
       Text {
         width: parent.width
-        text: "Use your regular Apple password, not an app-specific password. Your connection is protected in your login keyring."
+        text: "Use your regular Apple password, not an app-specific password. It is saved in encrypted form, unlocked by your login keyring. Only sign in on a desktop you trust."
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
         color: root.dim
@@ -323,7 +329,8 @@ FocusScope {
         width: parent.width
         foreground: root.foreground
         placeholderText: root.challengeKind === "code" ? "Six-digit verification code" : "Your answer"
-        password: root.challengePassword
+        password: root.challengePassword || root.challengeKind === "code"
+        passwordMaskDelay: 0
         maximumLength: root.challengeKind === "code" ? 6 : 1024
         inputMethodHints: Qt.ImhSensitiveData | Qt.ImhNoPredictiveText
         validator: RegularExpressionValidator { regularExpression: root.challengeKind === "code" ? /^[0-9]{0,6}$/ : /^[\s\S]*$/ }
