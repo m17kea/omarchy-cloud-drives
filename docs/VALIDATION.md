@@ -12,11 +12,27 @@
 - Native welcome, account, verification and connected forms rendered offscreen
   using this machine's real Omarchy UI and theme; previews are in `previews/`.
 
+## Live preparation check (2026-09-12)
+
+Tested on Omarchy 4.0.2, Linux x86-64 with packaged rclone 1.75.0:
+
+- Reproduced the old preparation path installing a version it then rejected.
+- Downloaded and installed the checksum-pinned private 1.75.1 runtime through
+  the new preparation path; the package-managed 1.75.0 was unchanged.
+- Reopened native preparation and observed `ready`, `encrypted` and `keyring`
+  all true. All three provider configs were mode 0600.
+- The generated user service passed `systemd-analyze --user verify`.
+- The native iCloud sign-in panel opened through the live shell.
+
+These checks do not establish successful Apple authentication or file sync.
+The 48-test isolated suite passed, including the real local rclone RC contract.
+
 ## Live-account release gate
 
 The following have **not** been completed in the automated development session:
 
-- Clean-machine preparation and locked/unlocked keyring behavior.
+- Broader clean-machine preparation and locked/unlocked keyring behavior
+  (one successful live preparation is recorded above).
 - Apple login, rejected password/code, trusted-device and SMS flows.
 - Advanced Data Protection approval, delayed approval and cancellation.
 - Mount/open/create/edit/rename/readback from another Apple device.
