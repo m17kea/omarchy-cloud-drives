@@ -21,6 +21,10 @@ measures, not a sandbox from other programs running as the same user. Password
 retention, keyring trust and outstanding upstream review are explicit in the
 [security model](SECURITY.md).
 
+The credential-free bar has a new `CloudDrivesPanel.qml` entrypoint in 0.3.0-dev.
+This also prevents a running shell from reusing the old credential-bearing
+`Panel.qml` component when its QML component cache survives a plugin rescan.
+
 Preparation must resolve dependencies, not strand users at a version error.
 When the distribution supplies an older rclone, install a checksum-pinned
 official release privately. Never replace package-managed binaries or require

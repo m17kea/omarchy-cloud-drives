@@ -80,7 +80,9 @@ class LauncherTests(unittest.TestCase):
                 signin.private_runtime_root()
 
     def test_shared_panel_has_no_credential_ui_or_auth_response_parser(self):
-        panel = (ROOT / 'Panel.qml').read_text()
+        manifest = json.loads((ROOT / 'manifest.json').read_text())
+        self.assertEqual(manifest['entryPoints']['barWidget'], 'CloudDrivesPanel.qml')
+        panel = (ROOT / manifest['entryPoints']['barWidget']).read_text()
         for fragment in ('ICloudSetup {', 'passwordField', 'pendingBegin', 'handleEvent', 'wizard.'):
             self.assertNotIn(fragment, panel)
         self.assertIn('root.signinLauncher', panel)
