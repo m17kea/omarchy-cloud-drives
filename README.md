@@ -1,84 +1,138 @@
-# Cloud Drives — Omarchy plugin
+# Cloud Drives for Omarchy
 
-Mount **Google Drive**, **OneDrive** and **iCloud Drive** as folders under
-`~/Cloud/` from a bar widget. Built on [rclone](https://rclone.org).
+Your cloud files, in your file manager. Connect iCloud Drive, Google Drive,
+and OneDrive from a panel that follows your Omarchy theme.
 
+A development fork of [edbron's Cloud Drives](https://github.com/edbron/omarchy-cloud-drives).
+This milestone improves iCloud onboarding and recovery. It retains the upstream
+plugin ID: install **either this fork or upstream**, not both. This fork is not
+a separate marketplace listing.
+
+## What is new
+
+- Native iCloud account and verification screens inside the Omarchy panel.
+- Preparation through Omarchy's normal terminal and package prompt.
+- A Reconnect action, visible errors, progress, and Open folder after mounting.
+- A separate encrypted configuration for each provider, leaving existing rclone setups alone.
+- Staged iCloud authentication: failure or cancellation preserves the current account.
+
+Google Drive and OneDrive retain their browser sign-in via a floating terminal.
+
+![Native iCloud account screen](docs/previews/account.png)
+
+Preview rendered from the native Omarchy components, with placeholder fields.
+
+## Development status
+
+This is a development preview. Tests exercise the protocol with simulated Apple
+responses and a pinned local rclone. Real Apple sign-in, trusted-device approval,
+and a cross-device file round trip are required before release. See
+[validation](docs/VALIDATION.md).
+
+## Install for testing
+
+Requires Omarchy 4 (Quattro). Review the development branch, then:
+
+```sh
+git clone --branch feature/native-icloud-onboarding \
+  https://github.com/m17kea/omarchy-cloud-drives.git \
+  ~/.config/omarchy/plugins/edbron.cloud-drives
+omarchy plugin validate ~/.config/omarchy/plugins/edbron.cloud-drives
+omarchy-shell shell rescanPlugins
+omarchy plugin enable edbron.cloud-drives
 ```
-~/Cloud/GoogleDrive
-~/Cloud/OneDrive
-~/Cloud/iCloudDrive
+
+If upstream is installed, unmount its drives before replacing the checkout.
+This fork does not migrate the old shared rclone configuration automatically.
+Reconnect accounts in the new panel. Do not run both versions' services together.
+
+## Connect iCloud
+
+1. Click the cloud in the bar, then **Connect** beside iCloud Drive.
+2. Prepare this computer if prompted. Return to the panel and check again.
+3. Enter your Apple Account email and **regular account password**.
+4. Enter the verification code or approve access on your trusted Apple device.
+5. Open `~/Cloud/iCloudDrive` when the mount is ready.
+
+App-specific passwords do not work with rclone's iCloud backend.
+Advanced Data Protection can remain enabled: allow iCloud web access and approve
+the trusted-device request. [Current rclone documentation](https://rclone.org/iclouddrive/).
+
+Sessions generally need renewing after about 30 days. **Reconnect** authenticates
+in a temporary encrypted config and verifies access before stopping the old mount
+and replacing its credentials. The mount then starts with the new session.
+
+## Mounts and caching
+
+Drives appear at `~/Cloud/iCloudDrive`, `~/Cloud/GoogleDrive`, and `~/Cloud/OneDrive`.
+Content downloads as you open files. Writes use rclone's disk cache and upload in
+the background. This is a cached network filesystem, not a full offline mirror
+or a conflict-resolving sync engine. Uncached files need a connection.
+
+The panel reports **mounted**, not that all pending writes reached the cloud.
+Close applications before unmounting; retain the cache until uploads are confirmed.
+Use independent backups and test concurrent edits before using critical files.
+
+## Credentials and local files
+
+The login keyring stores a random encryption key under
+`service=omarchy-cloud-drives key=config-password`. rclone reads it through
+`RCLONE_PASSWORD_COMMAND`. Each provider config is encrypted and mode 0600.
+Apple's password is stored obscured inside that encrypted file with its session
+credentials. Native input travels over stdin and a private Unix socket, never
+process arguments. The helper emits curated status messages instead of raw
+authentication responses.
+
+| Location | Purpose |
+| --- | --- |
+| `$XDG_CONFIG_HOME/omarchy-cloud-drives/<Remote>.conf` | Separate encrypted provider configs |
+| `$XDG_CONFIG_HOME/systemd/user/omarchy-cloud-drive@.service` | User mount service |
+| `$XDG_CACHE_HOME/omarchy-cloud-drives` | Cached files and pending uploads |
+| `$XDG_RUNTIME_DIR/omarchy-cloud-drives-*` | Temporary private authentication state |
+| `~/Cloud/<Remote>` | Mount points |
+
+XDG config/cache paths default to `~/.config` and `~/.cache`. No global rclone
+configuration or `environment.d` settings are modified. Cached file content is
+plaintext, restricted to your user. A cache identity stored inside each encrypted
+configuration isolates accounts: a different iCloud account gets a different
+cache, while reconnecting the same account retains pending writes. Old caches
+are retained for recovery and are not automatically deleted.
+
+Dependencies: rclone **1.75.1+**, fuse3, Python 3, libsecret (`secret-tool`), an
+unlocked login keyring, gum, jq, curl, and systemd. Preparation installs rclone
+and fuse3 with `omarchy pkg add`; other dependencies normally ship with Omarchy.
+
+## Commands and removal
+
+```sh
+bin/omarchy-cloud-drives state
+bin/omarchy-cloud-drives setup
+bin/omarchy-cloud-drives connect icloud
+bin/omarchy-cloud-drives reconnect icloud
+bin/omarchy-cloud-drives mount icloud
+bin/omarchy-cloud-drives unmount icloud
+bin/omarchy-cloud-drives open icloud
 ```
 
-## Install
+Other provider IDs are `google` and `onedrive`. Inspect mount failures with
+`systemctl --user status omarchy-cloud-drive@iCloudDrive.service` and
+`journalctl --user -u omarchy-cloud-drive@iCloudDrive.service --since today`.
 
+To remove: close files, confirm uploads in the cloud, **Forget** each connected
+account, then run `omarchy plugin remove edbron.cloud-drives`. Forget stops the
+service before removing that account's credentials. The service template,
+configuration files, keyring entry and cache are retained; disabled instances
+do not start. Remove retained data only after confirming uploads. Older upstream
+shared rclone/environment files are not managed by this fork.
+
+## Develop
+
+```sh
+python3 -m unittest discover -s tests -v
+bash -n bin/omarchy-cloud-drives
+omarchy plugin validate .
 ```
-omarchy plugin add https://github.com/edbron/omarchy-cloud-drives.git --enable
-```
 
-Dependencies (installed on first Connect via `omarchy pkg add`, sudo prompt):
-`rclone`, `fuse3`. Also uses `secret-tool` (libsecret), `gum`, `jq` and `curl`, which ship with Omarchy.
-
-## Usage
-
-Click the cloud icon in the bar. Each drive has **Connect** (first time),
-**Mount / Unmount**, **Open** and **Forget**. `j/k` move between drives,
-`h/l` between actions, `Enter` activates.
-
-Connect and Forget open a floating terminal for the interactive bits
-(browser sign-in, 2FA, confirmation). Everything else is silent.
-
-CLI: `~/.config/omarchy/plugins/edbron.cloud-drives/bin/omarchy-cloud-drives <state|setup|connect|disconnect|mount|unmount|open> [google|onedrive|icloud]`
-
-IPC: `omarchy-shell edbron.cloud-drives <state|refresh|toggle|mount ID|unmount ID|connect ID>`
-
-## Security model
-
-- **rclone's config is encrypted.** It holds OAuth refresh tokens and (for
-  iCloud) the session/trust token. The encryption password is 256 random bits
-  stored *only* in your login keyring (gnome-keyring, via `secret-tool`).
-  rclone reads it through `RCLONE_PASSWORD_COMMAND`; it is never written to
-  disk in the clear and never placed in an environment variable.
-- **Google / OneDrive** authenticate with OAuth in your browser; the plugin
-  never sees your password. Tokens can be revoked at any time from your
-  Google / Microsoft account security pages.
-- **iCloud** has no OAuth. rclone's `iclouddrive` backend needs your Apple ID
-  password once (stored obscured inside the encrypted config) plus a 2FA
-  code. The password is handed to rclone through its rc API over a private
-  unix socket (request body built from stdin), so neither the clear nor the
-  obscured value ever appears in a command line, the environment, logs or a
-  temporary file. Prefer an app-specific password. Advanced Data Protection must be
-  off for that Apple ID (Apple does not expose ADP-protected data to
-  third-party clients). This backend is marked experimental by rclone.
-- **Mounts** are user-private (`umask 077`, no `allow_other`) and run as
-  systemd user units (`omarchy-cloud-drive@<Remote>.service`) bound to the
-  graphical session so they stop with it. The units deliberately carry no
-  systemd sandboxing: mount-namespace options would hide the FUSE mount from
-  your session, and seccomp/`NoNewPrivileges` options break the setuid
-  `fusermount3`. Unprivileged FUSE is the isolation boundary.
-- Google: rclone's shared client_id is being retired during 2026. To keep
-  working long-term, create your own OAuth client
-  (https://rclone.org/drive/#making-your-own-client-id) and run
-  `rclone config update GoogleDrive client_id=… client_secret=…`.
-- Mount root `~/Cloud` is `0700`; the VFS cache lives in `~/.cache/rclone`
-  (max 4 GB, 72 h) — remember it holds plaintext copies of recently used files.
-- `~/.config/environment.d/60-omarchy-cloud-drives.conf` exports the same
-  `RCLONE_PASSWORD_COMMAND` so plain `rclone` in your terminal keeps working.
-
-## Files it touches
-
-| Path | Purpose |
-|------|---------|
-| `~/.config/rclone/rclone.conf` | encrypted rclone config (0600) |
-| `~/.config/systemd/user/omarchy-cloud-drive@.service` | mount unit template |
-| `~/.config/environment.d/60-omarchy-cloud-drives.conf` | password-command for your shell |
-| `~/Cloud/<Remote>` | mount points |
-| keyring item `service=omarchy-cloud-drives key=config-password` | config key |
-
-## Removing
-
-Forget each drive from the panel, then:
-```
-systemctl --user disable --now 'omarchy-cloud-drive@*'
-rm ~/.config/systemd/user/omarchy-cloud-drive@.service ~/.config/environment.d/60-omarchy-cloud-drives.conf
-secret-tool clear service omarchy-cloud-drives key config-password
-```
+See [design notes](docs/DESIGN.md) and [validation](docs/VALIDATION.md).
+MIT, retaining the original copyright. Original plugin by edbron; native iCloud
+onboarding and recovery in this fork by Michael Armitage and contributors.

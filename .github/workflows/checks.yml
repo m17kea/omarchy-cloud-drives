@@ -1,0 +1,33 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Shell syntax and Python contracts
+        run: |
+          bash -n bin/omarchy-cloud-drives
+          python3 -m unittest discover -s tests -v
+          git diff --check
+      - name: Pinned rclone protocol contract (no Apple account)
+        run: |
+          mkdir -p /tmp/cloud-drives-ci
+          curl --fail --location --silent --show-error --max-time 90 \
+            https://github.com/rclone/rclone/releases/download/v1.75.1/rclone-v1.75.1-linux-amd64.zip \
+            --output /tmp/cloud-drives-ci/rclone.zip
+          printf '%s\n' '982b5aa772841168f8e380f139e9e787b2a105403e32b94da8676a0e1c0a13ab  /tmp/cloud-drives-ci/rclone.zip' | sha256sum --check
+          unzip -q /tmp/cloud-drives-ci/rclone.zip -d /tmp/cloud-drives-ci
+          RCLONE_TEST_BINARY=/tmp/cloud-drives-ci/rclone-v1.75.1-linux-amd64/rclone \
+            python3 -m unittest discover -s tests -v

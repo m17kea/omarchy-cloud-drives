@@ -1,98 +1,74 @@
 import QtQuick
-import QtQuick.Controls
+import QtQuick.Controls as Controls
 import Quickshell
 import Quickshell.Io
 import qs.Ui
 import qs.Commons
 
-// Bar widget + popup for Cloud Drives: one row per provider (Google Drive,
-// OneDrive, iCloud Drive) with connect / mount / open / disconnect actions.
-// All the work happens in bin/omarchy-cloud-drives; interactive steps
-// (sign-in, 2FA, confirmations) run in a floating terminal.
 Panel {
   id: root
   moduleName: "edbron.cloud-drives"
   ipcTarget: "edbron.cloud-drives"
   manageIpc: false
 
-  readonly property string script: String(Qt.resolvedUrl("bin/omarchy-cloud-drives")).replace(/^file:\/\//, "")
-
+  readonly property string script: decodeURIComponent(String(Qt.resolvedUrl("bin/omarchy-cloud-drives")).replace(/^file:\/\//, ""))
+  readonly property color foreground: bar ? bar.foreground : Color.foreground
+  readonly property color dim: Qt.darker(foreground, 1.5)
+  readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   property bool rcloneInstalled: false
   property bool encrypted: false
   property bool keyring: false
+  property bool ready: false
   property string mountRoot: ""
   property var providers: []
+  property string lastError: ""
+  property string stateError: ""
   property bool busy: false
+  property string pendingAction: ""
+  property string pendingProvider: ""
+  property bool setupVisible: false
+  signal actionFinished(string action, string providerId, bool ok, string message)
 
-  readonly property int mountedCount: {
-    var n = 0
-    for (var i = 0; i < providers.length; i++) if (providers[i].mounted) n++
-    return n
-  }
-  readonly property int connectedCount: {
-    var n = 0
-    for (var i = 0; i < providers.length; i++) if (providers[i].configured) n++
-    return n
-  }
-  readonly property bool secure: rcloneInstalled && encrypted && keyring
-  readonly property color dim: Qt.darker(bar.foreground, 1.4)
-
-  // Cursor: one row per provider; h/l moves across that row's action pills.
-  property bool cursorActive: false
-  property int selectedIndex: 0
-  property var actionCursor: ({})
-
-  function actionsFor(p) {
-    if (!p) return []
-    if (!p.configured) return ["connect"]
-    var a = [p.mounted ? "unmount" : "mount"]
-    if (p.mounted) a.unshift("open")
-    a.push("disconnect")
-    return a
-  }
-  readonly property var actionLabels: ({ connect: "Connect", open: "Open", mount: "Mount", unmount: "Unmount", disconnect: "Forget" })
-  readonly property var actionIcons: ({ connect: "󰌘", open: "󰉋", mount: "󰐕", unmount: "󰅖", disconnect: "󰩹" })
-
-  function actionCursorFor(row) { return actionCursor[row] !== undefined ? actionCursor[row] : 0 }
-  function setActionCursor(row, idx) {
-    var next = Object.assign({}, actionCursor); next[row] = idx; actionCursor = next
-  }
-
-  function moveCursor(delta) {
-    var n = providers.length
-    if (!n) return
-    selectedIndex = Math.max(0, Math.min(n - 1, selectedIndex + delta))
-  }
-  function moveCursorH(delta) {
-    var acts = actionsFor(providers[selectedIndex])
-    if (!acts.length) return
-    setActionCursor(selectedIndex, Math.max(0, Math.min(acts.length - 1, actionCursorFor(selectedIndex) + delta)))
-  }
-  function activateCursor() {
-    var p = providers[selectedIndex]
-    if (!p) return
-    var acts = actionsFor(p)
-    run(acts[Math.min(actionCursorFor(selectedIndex), acts.length - 1)], p.id)
+  readonly property int mountedCount: providers.filter(function(p) { return p.mounted }).length
+  readonly property int connectedCount: providers.filter(function(p) { return p.configured }).length
+  readonly property var icloudProvider: {
+    for (var i = 0; i < providers.length; i++) if (providers[i].id === "icloud") return providers[i]
+    return ({ configured: false, mounted: false, path: "" })
   }
 
   function refresh() { if (!stateProc.running) stateProc.running = true }
 
-  // connect / disconnect need a terminal (browser sign-in, 2FA, confirm);
-  // mount / unmount / open are silent.
   function run(action, id) {
     if (busy) return
+    lastError = ""
+    if ((action === "connect" || action === "reconnect") && id === "icloud") {
+      setupVisible = true
+      open()
+      wizard.begin()
+      return
+    }
     if (action === "connect" || action === "disconnect") {
       Quickshell.execDetached([script, "launch", action, id])
       close()
       return
     }
+    pendingAction = action
+    pendingProvider = id
     busy = true
     actionProc.command = [script, action, id]
     actionProc.running = true
   }
 
   function stateIpc() {
-    return JSON.stringify({ rclone: rcloneInstalled, encrypted: encrypted, keyring: keyring, providers: providers })
+    return JSON.stringify({ rclone: rcloneInstalled, encrypted: encrypted, keyring: keyring,
+      ready: ready, error: lastError || stateError, providers: providers })
+  }
+
+  function providerStatus(p) {
+    if (p.error) return "Needs attention · reconnect to try again"
+    if (p.mounted) return String(p.path || "Connected").replace(/^\/home\/[^/]+/, "~")
+    if (p.active) return "Connecting your folder…"
+    return p.configured ? "Connected · folder closed" : "Ready when you are"
   }
 
   IpcHandler {
@@ -109,13 +85,12 @@ Panel {
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
-
   Component.onCompleted: refresh()
-  onOpenedChanged: if (opened) { refresh(); cursorActive = false; selectedIndex = 0 }
-  onProvidersChanged: if (selectedIndex >= providers.length) selectedIndex = 0
+  onOpenedChanged: {
+    if (opened) refresh()
+    else { wizard.cancel(); setupVisible = false }
+  }
 
-  // Mounts can appear/vanish from the terminal flow, so poll: fast while
-  // open, slow otherwise.
   Timer {
     interval: root.opened ? 2000 : 30000
     running: true
@@ -126,28 +101,58 @@ Panel {
   Process {
     id: stateProc
     command: [root.script, "state"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        try {
-          var s = JSON.parse(String(text || "{}"))
-          root.rcloneInstalled = !!s.rclone
-          root.encrypted = !!s.encrypted
-          root.keyring = !!s.keyring
-          root.mountRoot = s.root || ""
-          root.providers = s.providers || []
-        } catch (e) {
-          root.providers = []
-        }
+    stdout: StdioCollector { id: stateOutput; waitForEnd: true }
+    // Account details and diagnostics never become error text in the shell.
+    stderr: SplitParser { onRead: function(data) {} }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.stateError = "Could not check your drives. Try Refresh."
+        return
+      }
+      try {
+        if (stateOutput.text.length > 65536) throw new Error("oversize")
+        var s = JSON.parse(stateOutput.text)
+        if (!Array.isArray(s.providers)) throw new Error("invalid state")
+        root.rcloneInstalled = s.rclone === true
+        root.encrypted = s.encrypted === true
+        root.keyring = s.keyring === true
+        root.ready = s.ready === true
+        root.mountRoot = String(s.root || "").slice(0, 1024)
+        root.providers = s.providers.filter(function(p) {
+          return p && ["icloud", "google", "onedrive"].indexOf(p.id) !== -1
+        }).slice(0, 3).sort(function(a, b) {
+          return a.id === "icloud" ? -1 : (b.id === "icloud" ? 1 : 0)
+        })
+        // state emits fixed, actionable messages (never authentication stderr).
+        root.stateError = String(s.error || "").slice(0, 400)
+      } catch (e) {
+        root.stateError = "Could not read drive status. Try Refresh."
       }
     }
   }
 
   Process {
     id: actionProc
-    stdout: StdioCollector { waitForEnd: true }
-    stderr: StdioCollector { waitForEnd: true }
-    onRunningChanged: if (!running) { root.busy = false; root.refresh() }
+    stdout: SplitParser { onRead: function(data) {} }
+    stderr: SplitParser { onRead: function(data) {} }
+    onExited: function(exitCode) {
+      var action = root.pendingAction
+      var provider = root.pendingProvider
+      var message = ""
+      if (exitCode !== 0) {
+        if (action === "open") message = "Could not open your folder. Check that the drive is connected."
+        else if (action === "unmount") message = "Could not close this drive. Finish using its files and try again."
+        else message = "Your folder could not connect. Check your connection, then try again."
+        root.lastError = message
+      }
+      root.busy = false
+      root.pendingAction = ""
+      root.pendingProvider = ""
+      root.actionFinished(action, provider, exitCode === 0, message)
+      if (provider === "icloud" && action === "reconnect-mount") wizard.mountFinished(exitCode === 0, message)
+      if (provider === "icloud" && action === "open") wizard.openFinished(exitCode === 0, message)
+      root.refresh()
+    }
   }
 
   BarIconButton {
@@ -155,7 +160,10 @@ Panel {
     anchors.fill: parent
     bar: root.bar
     text: root.mountedCount > 0 ? "󰅟" : "󰅧"
-    onPressed: function(b) { root.toggle() }
+    onPressed: function(buttonCode) {
+      if (buttonCode === Qt.RightButton) root.refresh()
+      else root.toggle()
+    }
   }
 
   KeyboardPanel {
@@ -164,253 +172,186 @@ Panel {
     owner: root
     bar: root.bar
     open: root.opened
-    focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(360))
-    contentHeight: panel.fittedContentHeight(panelColumn.implicitHeight, Style.space(600))
+    focusTarget: root.setupVisible ? wizard : contentFocus
+    contentWidth: panel.fittedContentWidth(Style.space(390))
+    contentHeight: panel.fittedContentHeight(root.setupVisible ? wizard.implicitHeight : dashboard.implicitHeight, Style.space(660))
 
-    PanelKeyCatcher {
-      id: keyCatcher
+    FocusScope {
+      id: contentFocus
       anchors.fill: parent
-      onMoveRequested: function(dx, dy) {
-        if (!root.cursorActive) { root.cursorActive = true; return }
-        if (dy !== 0) root.moveCursor(dy)
-        else if (dx !== 0) root.moveCursorH(dx)
+      // Do not intercept typing with PanelKeyCatcher. Fields own their keys.
+      Keys.onEscapePressed: {
+        if (root.setupVisible) wizard.dismiss()
+        else root.close()
       }
-      onActivateRequested: if (root.cursorActive) root.activateCursor()
-      onCloseRequested: root.close()
-      onTabRequested: function(direction) { root.switchPanel(direction) }
 
-      Column {
-        id: panelColumn
-        width: parent.width
-        spacing: Style.space(14)
+      Flickable {
+        anchors.fill: parent
+        contentWidth: width
+        contentHeight: root.setupVisible ? wizard.implicitHeight : dashboard.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
+        Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
 
-        // ---------- Hero ----------
-        Item {
+        ICloudSetup {
+          id: wizard
           width: parent.width
-          implicitHeight: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight)
+          visible: root.setupVisible
+          active: root.setupVisible && root.opened
+          ready: root.ready
+          provider: root.icloudProvider
+          foreground: root.foreground
+          onPrepareRequested: Quickshell.execDetached([root.script, "launch", "setup"])
+          onRefreshRequested: root.refresh()
+          onMountRequested: root.run("reconnect-mount", "icloud")
+          onOpenFolderRequested: root.run("open", "icloud")
+          onDismissed: {
+            root.setupVisible = false
+            root.refresh()
+            Qt.callLater(function() { refreshButton.forceActiveFocus() })
+          }
+        }
+
+        Column {
+          id: dashboard
+          visible: !root.setupVisible
+          width: parent.width
+          spacing: Style.space(16)
+
+          PanelHero {
+            width: parent.width
+            title: "Cloud Drives"
+            meta: root.mountedCount ? root.mountedCount + " " + (root.mountedCount === 1 ? "folder" : "folders") + " connected" : "Your files, close at hand"
+            foreground: root.foreground
+            iconComponent: Component {
+              Text { text: "󰅟"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.display }
+            }
+          }
 
           Text {
-            id: heroIcon
-            text: "󰅟"
-            color: root.bar.foreground
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.display
-            anchors.left: parent.left
-            anchors.verticalCenter: parent.verticalCenter
+            visible: root.lastError !== "" || root.stateError !== ""
+            width: parent.width
+            text: root.lastError || root.stateError
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            color: Color.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
           }
 
           Column {
-            id: heroLabels
-            anchors.left: heroIcon.right
-            anchors.leftMargin: Style.space(14)
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.space(2)
+            width: parent.width
+            spacing: Style.space(12)
+            Repeater {
+              model: root.providers
+              delegate: Column {
+                id: driveRow
+                required property var modelData
+                width: dashboard.width
+                spacing: Style.space(8)
 
-            Text {
-              text: "Cloud Drives"
-              color: root.bar.foreground
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.title
-              font.bold: true
-              width: parent.width
-              elide: Text.ElideRight
-            }
+                Row {
+                  width: parent.width
+                  spacing: Style.space(10)
+                  Text {
+                    width: Style.space(26)
+                    text: String(driveRow.modelData.glyph || "󰅟").slice(0, 4)
+                    textFormat: Text.PlainText
+                    color: driveRow.modelData.mounted ? root.foreground : root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.title
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+                  Column {
+                    width: parent.width - Style.space(36)
+                    spacing: Style.space(3)
+                    Text {
+                      width: parent.width
+                      text: String(driveRow.modelData.name || "Drive").slice(0, 80)
+                      textFormat: Text.PlainText
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                      font.bold: true
+                      elide: Text.ElideRight
+                    }
+                    Text {
+                      width: parent.width
+                      text: root.providerStatus(driveRow.modelData)
+                      textFormat: Text.PlainText
+                      color: driveRow.modelData.error ? Color.urgent : root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      elide: Text.ElideMiddle
+                    }
+                  }
+                }
 
-            Text {
-              text: {
-                if (!root.rcloneInstalled) return "NOT SET UP · CONNECT A DRIVE TO BEGIN"
-                if (!root.connectedCount) return "NO ACCOUNTS CONNECTED"
-                return root.mountedCount + " OF " + root.connectedCount + " MOUNTED · " + (root.secure ? "KEYRING-ENCRYPTED" : "CONFIG NOT ENCRYPTED")
+                Flow {
+                  width: parent.width
+                  spacing: Style.space(5)
+                  Button {
+                    text: driveRow.modelData.configured ? (driveRow.modelData.mounted ? "Open folder" : "Connect folder") : "Connect"
+                    iconText: driveRow.modelData.mounted ? "󰉋" : "󰌘"
+                    bordered: true
+                    focusable: true
+                    enabled: !root.busy
+                    fontSize: Style.font.caption
+                    onClicked: root.run(!driveRow.modelData.configured ? "connect" : (driveRow.modelData.mounted ? "open" : "mount"), driveRow.modelData.id)
+                  }
+                  Button {
+                    visible: driveRow.modelData.id === "icloud" && driveRow.modelData.configured
+                    text: "Reconnect iCloud"
+                    focusable: true
+                    enabled: !root.busy
+                    fontSize: Style.font.caption
+                    onClicked: root.run("reconnect", "icloud")
+                  }
+                  Button {
+                    visible: driveRow.modelData.mounted
+                    text: "Close drive"
+                    focusable: true
+                    enabled: !root.busy
+                    fontSize: Style.font.caption
+                    onClicked: root.run("unmount", driveRow.modelData.id)
+                  }
+                  Button {
+                    visible: driveRow.modelData.configured && !driveRow.modelData.mounted
+                    text: "Forget"
+                    focusable: true
+                    enabled: !root.busy
+                    fontSize: Style.font.caption
+                    foreground: root.dim
+                    onClicked: root.run("disconnect", driveRow.modelData.id)
+                  }
+                }
+                PanelSeparator { width: parent.width; foreground: root.foreground }
               }
-              color: root.secure || !root.connectedCount ? root.dim : root.bar.urgent
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
-              font.bold: true
-              font.letterSpacing: 1.2
-              width: parent.width
-              elide: Text.ElideRight
-            }
-          }
-        }
-
-        PanelSeparator { foreground: root.bar.foreground }
-
-        // ---------- Providers ----------
-        Column {
-          width: parent.width
-          spacing: Style.space(10)
-
-          Item {
-            width: parent.width
-            implicitHeight: provHeader.implicitHeight
-            PanelSectionHeader {
-              id: provHeader
-              text: "DRIVES"
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-              anchors.left: parent.left
-              anchors.verticalCenter: parent.verticalCenter
-            }
-            Text {
-              text: root.mountRoot.replace(/^\/home\/[^\/]+/, "~")
-              color: root.dim
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
-              anchors.right: parent.right
-              anchors.rightMargin: Style.space(6)
-              anchors.verticalCenter: parent.verticalCenter
             }
           }
 
-          Repeater {
-            model: root.providers
-            ProviderRow {
-              required property var modelData
-              required property int index
-              width: panelColumn.width
-              provider: modelData
-              rowIndex: index
-            }
-          }
-        }
-
-        // ---------- Footnote ----------
-        Text {
-          width: parent.width
-          wrapMode: Text.WordWrap
-          text: "Sign-in happens in your browser (Google, Microsoft) or via Apple ID + 2FA (iCloud). Tokens are stored in an rclone config encrypted with a key that only lives in your login keyring."
-          color: root.dim
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.caption
-        }
-      }
-    }
-  }
-
-  component ActionPill: Button {
-    id: pill
-    required property string action
-    required property int actionIndex
-    required property int rowIndex
-    required property string providerId
-
-    text: root.actionLabels[action]
-    iconText: root.actionIcons[action]
-    fontSize: Style.font.caption
-    foreground: action === "disconnect" ? root.bar.urgent : root.bar.foreground
-    fontFamily: root.bar.fontFamily
-    horizontalPadding: Style.spacing.sm
-    verticalPadding: Style.spacing.controlPaddingY
-    bordered: true
-    enabled: !root.busy
-    hasCursor: root.cursorActive && root.selectedIndex === rowIndex && root.actionCursorFor(rowIndex) === actionIndex
-
-    onClicked: root.run(action, providerId)
-    onHovered: function(isHovered) {
-      if (!isHovered) return
-      root.cursorActive = true
-      root.selectedIndex = pill.rowIndex
-      root.setActionCursor(pill.rowIndex, pill.actionIndex)
-    }
-  }
-
-  component ProviderRow: CursorSurface {
-    id: row
-    required property var provider
-    required property int rowIndex
-    readonly property var actions: root.actionsFor(provider)
-
-    hasCursor: root.cursorActive && root.selectedIndex === rowIndex
-    current: provider.mounted
-    foreground: root.bar.foreground
-    fill: Style.hoverFillFor(root.bar.foreground, Color.accent)
-    currentFill: Style.selectedFillFor(root.bar.foreground, Color.accent)
-    implicitHeight: inner.implicitHeight + Style.spacing.xl
-
-    Column {
-      id: inner
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(6)
-      anchors.rightMargin: Style.space(6)
-      spacing: Style.space(6)
-
-      Row {
-        width: parent.width
-        spacing: Style.space(8)
-
-        Text {
-          text: row.provider.glyph
-          color: row.provider.configured ? root.bar.foreground : root.dim
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.title
-          width: Style.space(22)
-          horizontalAlignment: Text.AlignHCenter
-          anchors.verticalCenter: parent.verticalCenter
-        }
-
-        Column {
-          width: parent.width - Style.space(22) - Style.space(8) - Style.space(16)
-          anchors.verticalCenter: parent.verticalCenter
           Text {
-            text: row.provider.name
-            color: root.bar.foreground
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.body
-            elide: Text.ElideRight
             width: parent.width
-          }
-          Text {
-            text: {
-              if (!row.provider.configured) return "Not connected"
-              if (row.provider.mounted) return "Mounted · " + row.provider.path.replace(/^\/home\/[^\/]+/, "~")
-              if (row.provider.active) return "Mounting…"
-              return "Connected · not mounted"
-            }
+            text: "Files open on demand in your file manager."
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
             color: root.dim
-            font.family: root.bar.fontFamily
+            font.family: root.fontFamily
             font.pixelSize: Style.font.caption
-            elide: Text.ElideRight
-            width: parent.width
           }
-        }
-
-        Text {
-          text: row.provider.mounted ? "󰄬" : ""
-          color: root.bar.foreground
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.subtitle
-          width: Style.space(16)
-          horizontalAlignment: Text.AlignRight
-          anchors.verticalCenter: parent.verticalCenter
-        }
-      }
-
-      Row {
-        spacing: Style.spacing.xs
-        anchors.right: parent.right
-        Repeater {
-          model: row.actions
-          ActionPill {
-            required property string modelData
-            required property int index
-            action: modelData
-            actionIndex: index
-            rowIndex: row.rowIndex
-            providerId: row.provider.id
+          Button {
+            id: refreshButton
+            text: root.busy ? "Working…" : "Refresh"
+            iconText: "󰑐"
+            iconSpinning: root.busy
+            focusable: true
+            enabled: !root.busy
+            fontSize: Style.font.caption
+            onClicked: { root.lastError = ""; root.refresh() }
           }
         }
       }
-    }
-
-    MouseArea {
-      anchors.fill: parent
-      hoverEnabled: true
-      z: -1
-      onContainsMouseChanged: if (containsMouse) { root.cursorActive = true; root.selectedIndex = row.rowIndex }
     }
   }
 }

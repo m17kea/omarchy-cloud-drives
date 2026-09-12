@@ -9,22 +9,14 @@ PartOf=graphical-session.target
 
 [Service]
 Type=notify
-# rclone reads the encrypted config through the keyring, never from an env var.
-Environment=RCLONE_PASSWORD_COMMAND="secret-tool lookup service omarchy-cloud-drives key config-password"
-Environment=RCLONE_CONFIG=%h/.config/rclone/rclone.conf
-ExecStartPre=/usr/bin/mkdir -p -m 0700 %h/Cloud/%i %h/.cache/rclone
-ExecStart=/usr/bin/rclone mount %i: %h/Cloud/%i \
-  --vfs-cache-mode full \
-  --vfs-cache-max-size 4G \
-  --vfs-cache-max-age 72h \
-  --dir-cache-time 30s \
-  --poll-interval 15s \
-  --umask 077 \
-  --allow-other=false \
-  --log-level NOTICE
-ExecStop=/usr/bin/fusermount3 -uz %h/Cloud/%i
+# Worker removes inherited rclone options and selects the account-specific
+# cache recorded inside the encrypted config, then execs rclone in this PID.
+ExecStart=/usr/bin/python3 "@WORKER@" %i "@CONFIG@" "@MOUNT@" "@CACHE@"
+KillSignal=SIGINT
+TimeoutStopSec=40
 Restart=on-failure
 RestartSec=10
+TimeoutStartSec=45
 UMask=0077
 # fusermount3 is setuid root, so NoNewPrivileges/RestrictSUIDSGID would break
 # the mount. Unprivileged FUSE is the security boundary here instead.

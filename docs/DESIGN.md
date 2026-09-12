@@ -1,0 +1,20 @@
+# Design: make connection a complete experience
+
+The original native panel, rclone backend, login keyring and systemd services
+are useful foundations. The opportunity is the path from first connection to
+daily use and recovery.
+
+Account and verification forms live inside the themed shell. Only package
+installation needs Omarchy's setup terminal. Each screen has one clear primary
+action, cancellation, deliberate keyboard focus, and a short explanation.
+Fonts, colors, spacing and controls come from the shared Omarchy UI.
+
+Reauthentication must preserve the current account until a replacement works.
+Stage an encrypted config; authenticate; verify read access; stop the old mount;
+then commit the new credentials. Authentication success is separate from mount
+readiness. Do not label a filesystem "synced" merely because it is mounted.
+
+This iteration uses a fixed folder per provider. Folder selection, selective
+offline availability, upload-queue visibility, native Google/Microsoft sign-in,
+and migration are later milestones. The fork keeps the upstream ID and is not
+a separate marketplace release. Contribute upstream when the work fits its roadmap.
