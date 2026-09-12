@@ -8,6 +8,7 @@ FocusScope {
   id: root
   property bool active: false
   property bool ready: false
+  property string preparationError: ""
   property var provider: ({})
   property color foreground: Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.5)
@@ -22,6 +23,7 @@ FocusScope {
   property int eventCount: 0
   property bool cancelled: false
   property bool preparationLaunched: false
+  readonly property bool canRetryPreparation: step === "welcome" && preparationLaunched && !ready
   property bool folderError: false
   readonly property bool waiting: step === "working" || step === "mounting"
   implicitHeight: content.implicitHeight
@@ -160,6 +162,7 @@ FocusScope {
   }
 
   onStepChanged: Qt.callLater(focusStep)
+  onReadyChanged: if (active && step === "welcome") Qt.callLater(focusStep)
   onActiveChanged: if (!active) cancel()
   Keys.onEscapePressed: dismiss()
   Component.onDestruction: cancel()
@@ -231,6 +234,16 @@ FocusScope {
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
         color: root.dim
+        font.family: Style.font.family
+        font.pixelSize: Style.font.bodySmall
+      }
+      Text {
+        visible: !root.ready && root.preparationError !== ""
+        width: parent.width
+        text: root.preparationError.slice(0, 400)
+        textFormat: Text.PlainText
+        wrapMode: Text.WordWrap
+        color: Color.urgent
         font.family: Style.font.family
         font.pixelSize: Style.font.bodySmall
       }
@@ -377,7 +390,7 @@ FocusScope {
         focusable: true
         foreground: root.foreground
         opacity: enabled ? 1 : 0.5
-        KeyNavigation.tab: cancelButton
+        KeyNavigation.tab: root.canRetryPreparation ? retrySetupButton : cancelButton
         KeyNavigation.backtab: root.step === "account" ? passwordField : (root.step === "challenge" && root.challengeKind !== "approval" ? (root.smsAvailable ? smsButton : answerField) : cancelButton)
         enabled: !root.waiting && (root.step !== "account" || (!bridge.running && emailField.text.trim().length > 0 && passwordField.text.length > 0))
           && (root.step !== "challenge" || root.challengeKind === "approval" || (root.challengeKind === "code" ? answerField.text.length === 6 : answerField.text.length > 0))
@@ -385,11 +398,21 @@ FocusScope {
         onClicked: root.advance()
       }
       Button {
+        id: retrySetupButton
+        visible: root.canRetryPreparation
+        text: "Run setup again"
+        focusable: true
+        foreground: root.foreground
+        KeyNavigation.backtab: primaryButton
+        KeyNavigation.tab: cancelButton
+        onClicked: root.prepareRequested()
+      }
+      Button {
         id: cancelButton
         text: root.step === "done" ? "Done" : "Cancel"
         focusable: true
         foreground: root.dim
-        KeyNavigation.backtab: primaryButton
+        KeyNavigation.backtab: root.canRetryPreparation ? retrySetupButton : primaryButton
         KeyNavigation.tab: root.step === "account" ? emailField : (root.step === "challenge" && root.challengeKind !== "approval" ? answerField : primaryButton)
         onClicked: root.dismiss()
       }

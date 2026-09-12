@@ -10,7 +10,9 @@ def systemd_string(value):
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
 
 
-def render(template, config, mount, cache, worker):
+def render(template, config, mount, cache, worker, data_home):
+    # Environment= does not expand $VAR, unlike ExecStart= arguments.
+    template = template.replace("@DATA@", systemd_string(data_home))
     for marker, value in (("@CONFIG@", config), ("@MOUNT@", mount), ("@CACHE@", cache), ("@WORKER@", worker)):
         template = template.replace(marker, systemd_string(value).replace("$", "$$"))
     return template

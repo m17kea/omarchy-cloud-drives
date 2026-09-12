@@ -9,6 +9,12 @@ installation needs Omarchy's setup terminal. Each screen has one clear primary
 action, cancellation, deliberate keyboard focus, and a short explanation.
 Fonts, colors, spacing and controls come from the shared Omarchy UI.
 
+Preparation must resolve dependencies, not strand users at a version error.
+When the distribution supplies an older rclone, install a checksum-pinned
+official release privately. Never replace package-managed binaries or require
+a whole-system upgrade just to connect a drive. A shared read-only resolver
+keeps setup, authentication and systemd mounts on the same compatible runtime.
+
 Reauthentication must preserve the current account until a replacement works.
 Stage an encrypted config; authenticate; verify read access; stop the old mount;
 then commit the new credentials. Authentication success is separate from mount

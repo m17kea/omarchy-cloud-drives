@@ -200,6 +200,7 @@ Panel {
           visible: root.setupVisible
           active: root.setupVisible && root.opened
           ready: root.ready
+          preparationError: root.stateError
           provider: root.icloudProvider
           foreground: root.foreground
           onPrepareRequested: Quickshell.execDetached([root.script, "launch", "setup"])

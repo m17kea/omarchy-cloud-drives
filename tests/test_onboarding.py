@@ -7,12 +7,14 @@ from pathlib import Path
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
 from unittest import mock
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 SPEC = importlib.util.spec_from_file_location(
     "icloud_onboarding", Path(__file__).resolve().parents[1] / "bin" / "icloud-onboarding.py"
 )
@@ -364,6 +366,20 @@ class OnboardingTests(unittest.TestCase):
 
 
 class HTTPTests(unittest.TestCase):
+    def test_rc_server_uses_shared_runtime_without_ambient_debug_options(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            server = bridge.RCServer(runtime / 'config', runtime, threading.Event())
+            server.socket.touch()
+            process = mock.Mock()
+            process.poll.return_value = None
+            with mock.patch.object(bridge, 'resolve_rclone', return_value='/private/rclone'), \
+                 mock.patch.object(bridge.subprocess, 'Popen', return_value=process) as launch, \
+                 mock.patch.dict(os.environ, {'RCLONE_DUMP': 'auth'}):
+                server.start()
+            self.assertEqual(launch.call_args.args[0][0], '/private/rclone')
+            self.assertNotIn('RCLONE_DUMP', launch.call_args.kwargs['env'])
+
     def response(self, status, payload):
         response = mock.Mock()
         response.status = status
@@ -411,6 +427,7 @@ class RcloneContractTests(unittest.TestCase):
             runtime = root / "runtime"
             runtime.mkdir(mode=0o700)
             env = bridge.clean_environment()
+            env["XDG_DATA_HOME"] = str(root / "data")
             env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", "")
             encrypted = subprocess.run(
                 [str(binary), "config", "encryption", "set", "--config", str(config),

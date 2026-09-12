@@ -31,6 +31,7 @@ import threading
 import time
 import uuid
 
+from cloud_drives_runtime import RuntimeUnavailable, resolve_rclone
 
 REMOTE = "iCloudDrive"
 UNIT = "omarchy-cloud-drive@iCloudDrive.service"
@@ -139,7 +140,7 @@ class RCServer:
     def start(self):
         try:
             self.process = subprocess.Popen(
-                ["rclone", "rcd", "--config", str(self.config),
+                [resolve_rclone(), "rcd", "--config", str(self.config),
                  "--password-command", PASSWORD_COMMAND, "--ask-password=false",
                  "--rc-addr", "unix://" + str(self.socket), "--rc-no-auth",
                  "--rc-serve=false", "--rc-server-read-timeout", "60s",
@@ -149,7 +150,7 @@ class RCServer:
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 env=clean_environment(), umask=0o077,
             )
-        except OSError as exc:
+        except (OSError, RuntimeUnavailable) as exc:
             raise FlowError("setup_required") from exc
         deadline = time.monotonic() + START_TIMEOUT
         while time.monotonic() < deadline:

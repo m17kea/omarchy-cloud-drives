@@ -10,6 +10,30 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'bin' / 'omarchy-cloud-drives'
 
 
 class StateContract(unittest.TestCase):
+    def test_old_distribution_package_requests_preparation_not_manual_update(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            commands = root / 'bin'
+            commands.mkdir()
+            for name, content in {
+                'rclone': "#!/bin/sh\necho 'rclone v1.75.0'\n",
+                'secret-tool': '#!/bin/sh\nexit 1\n',
+                'systemctl': '#!/bin/sh\nexit 3\n',
+                'mountpoint': '#!/bin/sh\nexit 1\n',
+            }.items():
+                executable = commands / name
+                executable.write_text(content)
+                executable.chmod(0o700)
+            env = dict(os.environ, XDG_CONFIG_HOME=str(root / 'config'),
+                       XDG_DATA_HOME=str(root / 'data'),
+                       PATH=str(commands) + os.pathsep + os.environ['PATH'])
+            result = subprocess.run(['bash', str(SCRIPT), 'state'], env=env,
+                                    capture_output=True, text=True, timeout=10, check=True)
+            state = json.loads(result.stdout)
+            self.assertFalse(state['ready'])
+            self.assertIn('Prepare this computer', state['error'])
+            self.assertFalse((root / 'data').exists())
+
     def test_prepared_configs_are_recognized_and_ambient_secrets_ignored(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -42,7 +66,7 @@ esac
                 executable = commands / name
                 executable.write_text(content)
                 executable.chmod(0o700)
-            env = dict(os.environ, XDG_CONFIG_HOME=str(config),
+            env = dict(os.environ, XDG_CONFIG_HOME=str(config), XDG_DATA_HOME=str(root / 'data'),
                        PATH=str(commands) + os.pathsep + os.environ['PATH'],
                        RCLONE_CONFIG_PASS='unrelated-secret', RCLONE_DUMP='auth')
             result = subprocess.run(['bash', str(SCRIPT), 'state'], env=env,

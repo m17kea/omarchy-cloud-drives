@@ -8,6 +8,7 @@
 - Bounded authentication responses and network waits.
 - systemd path escaping, Bash syntax, Omarchy manifest validation.
 - Local rclone RC contract tests with scratch configuration and no Apple account.
+- Runtime selection and checksum verification without a system-package override.
 - Native welcome, account, verification and connected forms rendered offscreen
   using this machine's real Omarchy UI and theme; previews are in `previews/`.
 
@@ -27,3 +28,19 @@ The following have **not** been completed in the automated development session:
 
 Use a test folder and expendable files for mutation tests. This development
 build is not represented as an end-to-end validated iCloud client.
+
+## Opt-in file round trip
+
+After signing in and mounting iCloud, run:
+
+```sh
+python3 tests/live_drive_probe.py --run --mount "$HOME/Cloud/iCloudDrive"
+```
+
+This creates a uniquely named `Omarchy-iCloud-Test-*` folder. It tests a save,
+application-style atomic replacement, and rename, reading the expected bytes
+directly from iCloud after each step through a separate rclone process. It never
+scans or edits existing documents and retains `verified.txt` for inspection on
+an Apple device. This does not test concurrent editing, offline recovery or
+all possible application save patterns. Confirm the retained file on another
+device separately; a passing script is not that cross-device confirmation.

@@ -9,6 +9,7 @@ PartOf=graphical-session.target
 
 [Service]
 Type=notify
+Environment="XDG_DATA_HOME=@DATA@"
 # Worker removes inherited rclone options and selects the account-specific
 # cache recorded inside the encrypted config, then execs rclone in this PID.
 ExecStart=/usr/bin/python3 "@WORKER@" %i "@CONFIG@" "@MOUNT@" "@CACHE@"

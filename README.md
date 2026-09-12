@@ -12,6 +12,7 @@ a separate marketplace listing.
 
 - Native iCloud account and verification screens inside the Omarchy panel.
 - Preparation through Omarchy's normal terminal and package prompt.
+- A verified private rclone fallback when the system package is too old.
 - A Reconnect action, visible errors, progress, and Open folder after mounting.
 - A separate encrypted configuration for each provider, leaving existing rclone setups alone.
 - Staged iCloud authentication: failure or cancellation preserves the current account.
@@ -88,10 +89,11 @@ authentication responses.
 | `$XDG_CONFIG_HOME/omarchy-cloud-drives/<Remote>.conf` | Separate encrypted provider configs |
 | `$XDG_CONFIG_HOME/systemd/user/omarchy-cloud-drive@.service` | User mount service |
 | `$XDG_CACHE_HOME/omarchy-cloud-drives` | Cached files and pending uploads |
+| `$XDG_DATA_HOME/omarchy-cloud-drives/runtime` | Private rclone fallback, when needed |
 | `$XDG_RUNTIME_DIR/omarchy-cloud-drives-*` | Temporary private authentication state |
 | `~/Cloud/<Remote>` | Mount points |
 
-XDG config/cache paths default to `~/.config` and `~/.cache`. No global rclone
+XDG config/cache/data paths default to `~/.config`, `~/.cache` and `~/.local/share`. No global rclone
 configuration or `environment.d` settings are modified. Cached file content is
 plaintext, restricted to your user. A cache identity stored inside each encrypted
 configuration isolates accounts: a different iCloud account gets a different
@@ -99,8 +101,18 @@ cache, while reconnecting the same account retains pending writes. Old caches
 are retained for recovery and are not automatically deleted.
 
 Dependencies: rclone **1.75.1+**, fuse3, Python 3, libsecret (`secret-tool`), an
-unlocked login keyring, gum, jq, curl, and systemd. Preparation installs rclone
-and fuse3 with `omarchy pkg add`; other dependencies normally ship with Omarchy.
+unlocked login keyring, gum, jq, curl, and systemd. Preparation installs missing
+fuse3 with `omarchy pkg add`. If no compatible rclone is available, it downloads
+the pinned official Linux x86-64 release into the private runtime directory,
+verifies its SHA-256 checksum before installation, and leaves the system package
+untouched. Sign-in, state checks and mounts share the same runtime selector.
+Preparation is the only action that downloads a runtime; there are no silent
+background updates. Other architectures currently require a compatible rclone
+already installed. Other dependencies normally ship with Omarchy.
+
+The 1.75.1 floor includes an iCloud app-container upload fix and VFS cache and
+shutdown fixes; it is not just a version-label preference.
+[Upstream release notes](https://rclone.org/changelog/#v1-75-1-2026-09-04).
 
 ## Commands and removal
 
@@ -121,7 +133,7 @@ Other provider IDs are `google` and `onedrive`. Inspect mount failures with
 To remove: close files, confirm uploads in the cloud, **Forget** each connected
 account, then run `omarchy plugin remove edbron.cloud-drives`. Forget stops the
 service before removing that account's credentials. The service template,
-configuration files, keyring entry and cache are retained; disabled instances
+configuration files, keyring entry, private runtime and cache are retained; disabled instances
 do not start. Remove retained data only after confirming uploads. Older upstream
 shared rclone/environment files are not managed by this fork.
 
