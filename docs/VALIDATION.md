@@ -57,6 +57,22 @@ No credential-bearing crash was triggered and no existing crash memory was
 read. Automated and agent-assisted review is not an independent security
 audit. See [remaining risks](SECURITY.md).
 
+### Installed hardening and reload limitation
+
+The updated preparation command completed using the existing encrypted configs
+and keyring key. `systemd-analyze --user verify` passed. The loaded iCloud unit
+reports `LimitCORE=0`, `LimitCORESoft=0`, `CoredumpFilter=0x0`, null stdout/stderr
+and the explicit loader-variable removal list. It remains inactive; no account
+is configured and no Apple authentication or cloud mutation was performed.
+
+The running Omarchy shell retained the old `Panel.qml` component through both
+rescanning and disabling/re-enabling the plugin. The new 0.3.0-dev entrypoint
+avoids that component URL, but this already-running shell then reported a
+`File name case mismatch` load error despite the correctly named file on disk.
+A fresh desktop-shell load remains necessary to verify activation on this
+machine. The shell was not restarted during this check, and the live bar update
+must not be counted as complete merely because the files were installed.
+
 ## Live-account release gate
 
 The following have **not** been completed in the automated development session:

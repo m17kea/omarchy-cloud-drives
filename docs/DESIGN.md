@@ -22,8 +22,10 @@ retention, keyring trust and outstanding upstream review are explicit in the
 [security model](SECURITY.md).
 
 The credential-free bar has a new `CloudDrivesPanel.qml` entrypoint in 0.3.0-dev.
-This also prevents a running shell from reusing the old credential-bearing
-`Panel.qml` component when its QML component cache survives a plugin rescan.
+This avoids the old credential-bearing `Panel.qml` component URL when the QML
+cache survives a plugin rescan. Some running shells may still require a fresh
+load; check the live plugin rather than treating a successful rescan as proof
+that the updated code is active.
 
 Preparation must resolve dependencies, not strand users at a version error.
 When the distribution supplies an older rclone, install a checksum-pinned
